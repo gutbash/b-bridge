@@ -253,6 +253,18 @@ public:
     return get().eliminateRedundantSetterCalls;
   }
 
+  static uint32_t getClientCmdPublishBatch() {
+    return get().clientCmdPublishBatch;
+  }
+
+  static uint32_t getClientFrameCap() {
+    return get().clientFrameCap;
+  }
+
+  static bool getClientStateBatch() {
+    return get().clientStateBatch;
+  }
+
 private:
   GlobalOptions() = default;
 
@@ -430,6 +442,22 @@ private:
     // If set, the bridge client will not send certain setter calls to the bridge server if the client knows the setter is writing
     // the the same value that is currently stored.
     eliminateRedundantSetterCalls = bridge_util::Config::getOption<bool>("eliminateRedundantSetterCalls", false);
+
+    // Number of client->server commands queued before their availability is published to the server
+    // (1 = publish every command). Larger batches cut the cross-core cache traffic per command; the
+    // client always publishes before it waits on the server, so this only adds a few microseconds of
+    // latency within a frame.
+    clientCmdPublishBatch = bridge_util::Config::getOption<uint32_t>("clientCmdPublishBatch", 32);
+
+    // Client-side frame cap in fps (0 = off). The server's DXVK must not pace (its cap sleep blocks every
+    // synchronous round trip such as occlusion-query GetData), so the game thread paces itself in Present
+    // after the frame has been handed to the server.
+    clientFrameCap = bridge_util::Config::getOption<uint32_t>("clientFrameCap", 0);
+
+    // Pack the hot state setters (render/sampler/stage states, textures, shaders, declarations,
+    // streams, indices, float constants) into one command per draw instead of ~9. Requires
+    // sendAllServerResponses = False (the setters get no per-call reply in batch mode).
+    clientStateBatch = bridge_util::Config::getOption<bool>("clientStateBatch", true);
   }
 
   void initSharedHeapPolicy();
@@ -482,4 +510,7 @@ private:
   bool alwaysCopyEntireStaticBuffer;
   bool exposeRemixApi;
   bool eliminateRedundantSetterCalls;
+  uint32_t clientCmdPublishBatch;
+  uint32_t clientFrameCap;
+  bool clientStateBatch;
 };

@@ -153,6 +153,21 @@ public:
   struct BaseDirect3DDevice9Ex_LSS::State m_captureState;
   void StateTransfer(const BaseDirect3DDevice9Ex_LSS::StateCaptureDirtyFlags& flags, BaseDirect3DDevice9Ex_LSS::State& src, BaseDirect3DDevice9Ex_LSS::State& dst);
 
+  // Compact transfer plan: the dirty flags are fixed once the block exists (CreateStateBlock type or the
+  // recorded set at EndStateBlock), but StateTransfer used to walk every flag (~20k, most of them the 8192
+  // software vertex constants) on every Apply/Capture; GTA IV applies ~475 blocks per frame. The plan lists
+  // just the dirty indices and copies whole arrays when a category is entirely dirty.
+  struct TransferPlan {
+    bool built = false;
+    bool allRenderStates = false, allTransforms = false, allSamplerStates = false, allTextureStageStates = false;
+    bool allVsF = false, allVsI = false, allPsF = false, allPsI = false;
+    std::vector<uint16_t> renderStates, transforms, vsF, vsI, vsB, psF, psI, psB;
+    std::vector<uint16_t> samplerStates, textureStageStates;   // stage * 64 + type
+    std::vector<uint8_t> streams, streamOffsetsAndStrides, streamFreqs, textures, clipPlanes;
+  } m_plan;
+  void buildPlan();
+  void invalidatePlan() { m_plan.built = false; }
+
 };
 
 #endif // D3D9_LSS_H_

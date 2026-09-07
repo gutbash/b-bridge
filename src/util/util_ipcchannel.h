@@ -26,6 +26,7 @@
 #include "util_atomiccircularqueue.h"
 #include "util_blockingcircularqueue.h"
 #include "util_sharedmemory.h"
+#include "util_fastlock.h"
 
  // Helper struct that ties together everything needed to send commands and data and for synchronization
 template<bridge_util::Accessor Accessor>
@@ -98,7 +99,10 @@ public:
   bridge_util::DataQueue* const      data;
   bridge_util::NamedSemaphore* const dataSemaphore;
   std::atomic<bool>* const           pbCmdInProgress;
-  mutable std::mutex                 m_mutex;
+  // 2026-09-05: recursive so the client's device lock and the Command lock are ONE lock: a device method
+  // holding the lock creates Commands without a second interlocked acquire/release (see d3d9_device.h
+  // lockImpl and Bridge::lockWriter). Was std::mutex, then a plain SRW lock.
+  mutable bridge_util::SrwRecursiveLock m_mutex;
 
   // Extra storage needed for data queue synchronization params
   static constexpr size_t kReservedSpace = align<size_t>(sizeof(*serverDataPos) +

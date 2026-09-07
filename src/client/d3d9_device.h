@@ -25,6 +25,10 @@
 
 #include "util_common.h"
 #include "util_scopedlock.h"
+#include "util_fastlock.h"
+#include "util_commands.h"
+#include "util_bridgecommand.h"
+#include "util_devicecommand.h"
 
 #include <type_traits>
 
@@ -34,7 +38,8 @@ class Direct3DDevice9Ex_LSS: public BaseDirect3DDevice9Ex_LSS {
 #ifdef WITH_MULTITHREADED_DEVICE
   // Using a std::recursive_mutex at the moment. On a 3GHz Threadripper system measured
   // ~22ns for lock/unlock sequence with no contention.
-  typedef std::conditional_t<EnableSync, std::recursive_mutex, bridge_util::nop_sync> LockType;
+  // was std::recursive_mutex (mtx_do_lock ~3x the cost of a raw SRW lock; ~15% of the render thread in GTA IV)
+  typedef std::conditional_t<EnableSync, bridge_util::SrwRecursiveLock, bridge_util::nop_sync> LockType;
 
   // TODO: The lock is global because currently the bridge and the transport queues
   // are NOT thread-safe.This mutex can be made device-local or completely removed
@@ -42,17 +47,68 @@ class Direct3DDevice9Ex_LSS: public BaseDirect3DDevice9Ex_LSS {
   inline static LockType s_globalLock;
 
 public:
+  // ---- state batching (2026-09-06) -----------------------------------------------------------
+  // Record: word0 = command | (argWords << 16), then argWords words. Float constants carry
+  // start, count, then count*4 floats. Flushed as one IDirect3DDevice9Ex_StateBatch by
+  // flushStateBatch(), which every other Command triggers first (see util_bridgecommand.cpp).
+  static constexpr uint32_t kBatchWords = 16384;   // 64 KB
+  uint32_t m_batchBuf[kBatchWords];
+  uint32_t m_batchLen = 0;
+  int m_batchMode = -1;                              // -1 unknown, 0 off, 1 on
+  inline static Direct3DDevice9Ex_LSS* s_batchDevice = nullptr;
+  static void flushStateBatchStatic() {
+    if (s_batchDevice) s_batchDevice->flushStateBatch();
+  }
+  bool batchActive() {
+    if (m_batchMode < 0) {
+      m_batchMode = (GlobalOptions::getClientStateBatch() && !GlobalOptions::getSendAllServerResponses()) ? 1 : 0;
+      if (m_batchMode) { s_batchDevice = this; g_stateBatchFlush = &Direct3DDevice9Ex_LSS::flushStateBatchStatic; }
+    }
+    return m_batchMode == 1 && m_stateRecording == nullptr;
+  }
+  void flushStateBatch() {
+    if (m_batchLen == 0) { g_stateBatchPending = false; return; }
+    const uint32_t words = m_batchLen;
+    m_batchLen = 0;
+    g_stateBatchPending = false;
+    ClientMessage c(Commands::IDirect3DDevice9Ex_StateBatch, getId());
+    c.send_data(words * sizeof(uint32_t), (void*) m_batchBuf);
+  }
+  template<typename... Ts>
+  void batchCmd(Commands::D3D9Command cmd, Ts... args) {
+    constexpr uint32_t n = sizeof...(Ts);
+    if (m_batchLen + 1 + n > kBatchWords) flushStateBatch();
+    m_batchBuf[m_batchLen++] = (uint32_t) cmd | (n << 16);
+    ((m_batchBuf[m_batchLen++] = (uint32_t) args), ...);
+    g_stateBatchPending = true;
+  }
+  void batchConst(Commands::D3D9Command cmd, uint32_t start, uint32_t count, const float* data) {
+    const uint32_t n = 2 + count * 4;
+    if (n + 1 > kBatchWords) return;   // cannot happen (count <= 256)
+    if (m_batchLen + 1 + n > kBatchWords) flushStateBatch();
+    m_batchBuf[m_batchLen++] = (uint32_t) cmd | (n << 16);
+    m_batchBuf[m_batchLen++] = start;
+    m_batchBuf[m_batchLen++] = count;
+    memcpy(&m_batchBuf[m_batchLen], data, count * 4 * sizeof(float));
+    m_batchLen += count * 4;
+    g_stateBatchPending = true;
+  }
+  // -------------------------------------------------------------------------------------------
+
   void lock() override {
     lockImpl();
   }
   void unlock() override {
     unlockImpl();
   }
+  // 2026-09-05: the device lock IS the writer-channel lock (recursive), so the Commands issued while a
+  // device method holds it cost no extra interlocked operations. s_globalLock is kept only for the
+  // non-synchronised instantiation (nop).
   void lockImpl() {
-    s_globalLock.lock();
+    if constexpr (EnableSync) { DeviceBridge::lockWriter(); } else { s_globalLock.lock(); }
   }
   void unlockImpl() {
-    s_globalLock.unlock();
+    if constexpr (EnableSync) { DeviceBridge::unlockWriter(); } else { s_globalLock.unlock(); }
   }
 #endif
 

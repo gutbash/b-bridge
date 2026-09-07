@@ -443,6 +443,9 @@ namespace Commands {
     IDirect3DQuery9_GetDataSize,
     IDirect3DQuery9_Issue,
     IDirect3DQuery9_GetData,
+
+    // 2026-09-06: one command carrying many hot state setters (see Direct3DDevice9Ex_LSS::batchCmd)
+    IDirect3DDevice9Ex_StateBatch,
   };
 
   // Maybe this will be useful...  
@@ -860,6 +863,7 @@ namespace Commands {
     case IDirect3DQuery9_GetDataSize: return "IDirect3DQuery9_GetDataSize";
     case IDirect3DQuery9_Issue: return "IDirect3DQuery9_Issue";
     case IDirect3DQuery9_GetData: return "IDirect3DQuery9_GetData";
+    case IDirect3DDevice9Ex_StateBatch: return "IDirect3DDevice9Ex_StateBatch";
 
     default: return "Unknown Command";
     }

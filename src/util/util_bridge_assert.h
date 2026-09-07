@@ -34,9 +34,10 @@
   assert(ASSERT_CONDITION);                                    \
 
 static void bridgeAssertLog(const std::string& assertString, const std::string& preferredString = "") {
+  // 2026-09-04 local fix: the branches were inverted, so a supplied message was never printed.
   if (!preferredString.empty()) {
-    bridge_util::Logger::err("BridgeAssert: " + assertString);
+    bridge_util::Logger::err("BridgeAssert: " + preferredString + " [" + assertString + "]");
   } else {
-    bridge_util::Logger::err("BridgeAssert: " + preferredString);
+    bridge_util::Logger::err("BridgeAssert: " + assertString);
   }
 }

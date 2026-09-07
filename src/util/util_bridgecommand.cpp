@@ -56,7 +56,16 @@ DECL_BRIDGE_FUNC(void, init,
 }
 
 DECL_BRIDGE_FUNC(void, syncDataQueue, size_t expectedMemUsage, bool posResetOnLastIndex) {
-  int serverCount = *s_pWriterChannel->serverDataPos;
+  // 2026-09-05: *serverDataPos is written by the other process on every pull; reading it on every
+  // data push was a cross-core miss per push. Use a local copy (always <= the true position, i.e.
+  // conservative) and refresh it every 64 pushes or whenever the copy suggests an overwrite.
+  static int s_cachedServerPos = -1;
+  static uint32_t s_cachedServerPosAge = 0;
+  if (++s_cachedServerPosAge >= 64) {
+    s_cachedServerPos = (int) *s_pWriterChannel->serverDataPos;
+    s_cachedServerPosAge = 0;
+  }
+  int serverCount = s_cachedServerPos;
   size_t currClientDataPos = s_pWriterChannel->get_data_pos();
   size_t expectedClientDataPos = currClientDataPos + ((expectedMemUsage != 0) ? expectedMemUsage : 1) - 1;
   size_t totalSize = s_pWriterChannel->data->get_total_size();
@@ -74,6 +83,8 @@ DECL_BRIDGE_FUNC(void, syncDataQueue, size_t expectedMemUsage, bool posResetOnLa
     const auto maxRetries = GlobalOptions::getCommandRetries();
     size_t numRetries = 0;
     Logger::warn("Waiting on server to process enough data from data queue to prevent overwrite...");
+    // The server can only consume data for commands it can see: publish everything batched first.
+    flushAllBridgeWriters();
     while (RESULT_FAILURE(s_pWriterChannel->dataSemaphore->wait()) && numRetries++ < maxRetries) {
     }
     if (numRetries >= maxRetries) {
@@ -107,11 +118,20 @@ DECL_BRIDGE_FUNC(void, syncDataQueue, size_t expectedMemUsage, bool posResetOnLa
     * 1. client < server, expectedClient >= server
     * 2. client > server, expectedClient >= server, expectedClient < client
     */
-  if (expectedClientDataPos >= serverCount &&
-      ((s_curBatchStartPos < serverCount)
-       || (s_curBatchStartPos > serverCount && expectedClientDataPos < s_curBatchStartPos)
-       || ((s_curBatchStartPos <= serverCount) && *s_pWriterChannel->serverResetPosRequired))) {
-    handleOverwriteCondition();
+  auto wouldOverwrite = [&](int sc) {
+    return expectedClientDataPos >= sc &&
+      ((s_curBatchStartPos < sc)
+       || (s_curBatchStartPos > sc && expectedClientDataPos < s_curBatchStartPos)
+       || ((s_curBatchStartPos <= sc) && *s_pWriterChannel->serverResetPosRequired));
+  };
+  if (wouldOverwrite(serverCount)) {
+    // Re-check against the live position before stalling.
+    serverCount = (int) *s_pWriterChannel->serverDataPos;
+    s_cachedServerPos = serverCount;
+    s_cachedServerPosAge = 0;
+    if (wouldOverwrite(serverCount)) {
+      handleOverwriteCondition();
+    }
   }
 }
 
@@ -128,6 +148,7 @@ DECL_BRIDGE_FUNC(Header, pop_front) {
 }
 
 DECL_BRIDGE_FUNC(bridge_util::Result, ensureQueueEmpty) {
+  flushAllBridgeWriters();
   if (getReaderChannel().commands->isEmpty()) {
     return bridge_util::Result::Success;
   }
@@ -154,6 +175,8 @@ DECL_BRIDGE_FUNC(bridge_util::Result, waitForCommand, const Commands::D3D9Comman
                                                       DWORD overrideTimeoutMS,
                                                       std::atomic<bool>* const pbEarlyOutSignal, bool verifyUID, UID uidToVerify) {
   ZoneScoped;
+  // Anything we are about to wait for can only arrive once the other side has seen everything we queued.
+  flushAllBridgeWriters();
   DWORD peekTimeoutMS = overrideTimeoutMS > 0 ? overrideTimeoutMS : GlobalOptions::getCommandTimeout();
   uint32_t maxAttempts = GlobalOptions::getCommandRetries();
 #ifdef ENABLE_WAIT_FOR_COMMAND_TRACE
@@ -253,12 +276,29 @@ DECL_BRIDGE_FUNC(bridge_util::Result, waitForCommand, const Commands::D3D9Comman
   template<typename BridgeId> \
   RETURN_T Bridge<BridgeId>::Command::NAME(__VA_ARGS__)
 
+#ifdef REMIX_BRIDGE_CLIENT
+bool g_stateBatchPending = false;
+void (*g_stateBatchFlush)() = nullptr;
+#endif
+
 DECL_COMMAND_FUNC(,Command,const Commands::D3D9Command command,
                            uintptr_t pHandle,
                            const Commands::Flags commandFlags)
   : m_command(command)
   , m_handle((uint32_t) (size_t) pHandle)
   , m_commandFlags(commandFlags) {
+#ifdef REMIX_BRIDGE_CLIENT
+  if (g_stateBatchPending && command != Commands::IDirect3DDevice9Ex_StateBatch && g_stateBatchFlush) {
+    // The batch buffer is device state guarded by the (recursive) channel lock; a Draw from a thread
+    // that does not hold the device lock must not flush while another thread appends.
+    s_pWriterChannel->m_mutex.lock();
+    if (g_stateBatchPending) {
+      g_stateBatchPending = false;
+      g_stateBatchFlush();   // runs a complete StateBatch Command (ctor+dtor) before this one starts
+    }
+    s_pWriterChannel->m_mutex.unlock();
+  }
+#endif
   // If the assert or exception gets triggered it means that there is more than one Command
   // instance in a function or command block with overlapping object lifecycles. Only one instance
   // can be alive at a time to ensure data integrity on the command and data buffers. To resolve
@@ -276,40 +316,28 @@ DECL_COMMAND_FUNC(,Command,const Commands::D3D9Command command,
 #endif
 
 #ifdef REMIX_BRIDGE_CLIENT
-  s_pWriterChannel->m_mutex.lock();
+  s_pWriterChannel->m_mutex.lock();   // recursive: free when the caller already holds the device lock
 #endif
 
-  assert(!s_pWriterChannel->pbCmdInProgress->load());
-  if (s_pWriterChannel->pbCmdInProgress->load()) {
+  assert(!s_pWriterChannel->pbCmdInProgress->load(std::memory_order_relaxed));
+  if (s_pWriterChannel->pbCmdInProgress->load(std::memory_order_relaxed)) {
     Logger::errLogMessageBoxAndExit(logger_strings::MultipleActiveCommands);
   }
   // Only start a data batch if the bridge is actually enabled, otherwise this becomes a no-op
   if (gbBridgeRunning) {
     s_pWriterChannel->data->begin_batch();
   }
-  s_pWriterChannel->pbCmdInProgress->store(true);
+  s_pWriterChannel->pbCmdInProgress->store(true, std::memory_order_relaxed);   // same-thread guard under the channel lock; no fence needed
   s_curBatchStartPos = (int32_t) s_pWriterChannel->data->get_pos();
   s_cmdCounter++;
-  if (gbBridgeRunning) {
-    // Send command id as part of data queue for everycommand from client to server
-#ifdef REMIX_BRIDGE_CLIENT
-      syncDataQueue(1, false);
-      const auto result = s_pWriterChannel->data->push((UINT)s_cmdUID);
-#if defined(_DEBUG) || defined(DEBUGOPT)
-      if (GlobalOptions::getLogAllCommands()) {
-        Logger::info("Pushed UID: " + std::to_string(s_cmdUID));
-      }
-#endif
-      if (RESULT_FAILURE(result)) {
-        // For now just log when things go wrong, but could use some robustness improvements
-        Logger::err("DataQueue send_data: Failed to send data!");
-      }
-#endif
-  }
+  // 2026-09-05: the command UID is no longer pushed through the data ring. The queue is a strict FIFO, so
+  // the server derives the same UID by counting the headers it pulls (see ProcessDeviceCommandQueue /
+  // processModuleCommandQueue); the client only advances s_cmdUID for headers that were actually pushed.
 }
 
 DECL_COMMAND_FUNC(,~Command) {
   // Only actually send the command if the bridge is enabled, otherwise this becomes a no-op
+  bool headerSent = false;
   if (gbBridgeRunning) {
     s_pWriterChannel->data->end_batch();
     s_curBatchStartPos = -1;
@@ -345,13 +373,27 @@ DECL_COMMAND_FUNC(,~Command) {
         std::string command = Commands::toString(m_command);
         Logger::debug(format_string("The command %s took %d retries (%d ms)!", command.c_str(), numRetries, numRetries * GlobalOptions::getCommandTimeout()));
       }
+    headerSent = RESULT_SUCCESS(result);
   }
-  s_pWriterChannel->pbCmdInProgress->store(false);
+  s_pWriterChannel->pbCmdInProgress->store(false, std::memory_order_relaxed);
 #ifdef REMIX_BRIDGE_CLIENT
-  ++s_cmdUID;
+  {
+    auto& ws = bridge_util::WaitStats::get();
+    ws.cmds++;
+    if ((uint16_t) m_command < bridge_util::WaitStats::kHistSize) ws.hist[(uint16_t) m_command]++;
+  }
+  // UID = number of headers pushed before this one; the server counts pulled headers the same way.
+  if (headerSent) {
+    ++s_cmdUID;
+  }
   s_pWriterChannel->m_mutex.unlock();
 #endif
 }
 
 template class Bridge<BridgeId::Module>;
 template class Bridge<BridgeId::Device>;
+
+void flushAllBridgeWriters() {
+  Bridge<BridgeId::Device>::flushWriter();
+  Bridge<BridgeId::Module>::flushWriter();
+}

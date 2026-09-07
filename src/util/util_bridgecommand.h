@@ -29,18 +29,25 @@
 #include "util_bridge_state.h"
 #include "util_ipcchannel.h"
 #include "util_singleton.h"
+#include "util_waitstats.h"
 #include "../tracy/tracy.hpp"
 
 extern bool gbBridgeRunning;
 
-#define WAIT_FOR_SERVER_RESPONSE(func, value, uidVal) \
-  { \
-    const uint32_t timeoutMs = GlobalOptions::getAckTimeout(); \
-    if (Result::Success != DeviceBridge::waitForCommand(Commands::Bridge_Response, timeoutMs, nullptr, true, uidVal)) { \
-      Logger::err(func " failed with: no response from server."); \
-      return value; \
-    } \
-  }
+// Publish every batched-but-unpublished command on every writer channel (Device and Module). Call before
+// blocking on anything the other side must process first: reply waits, the data-ring overwrite semaphore,
+// Present sync, shutdown. See AtomicCircularQueue::flush().
+void flushAllBridgeWriters();
+
+#ifdef REMIX_BRIDGE_CLIENT
+// State batching (2026-09-06): the device appends hot setters to a local buffer and sends them as one
+// IDirect3DDevice9Ex_StateBatch command. Any other command must see them first, so every Command
+// constructor flushes a pending batch before it takes the channel.
+extern bool g_stateBatchPending;
+extern void (*g_stateBatchFlush)();
+#endif
+
+#define WAIT_FOR_SERVER_RESPONSE(func, value, uidVal)   {     const uint32_t timeoutMs = GlobalOptions::getAckTimeout();     const uint64_t waitT0 = bridge_util::WaitStats::nowUs();     const auto waitRes = DeviceBridge::waitForCommand(Commands::Bridge_Response, timeoutMs, nullptr, true, uidVal);     bridge_util::WaitStats::get().record(bridge_util::WaitStats::get().waits, func, bridge_util::WaitStats::nowUs() - waitT0);     if (Result::Success != waitRes) {       Logger::err(func " failed with: no response from server.");       return value;     }   }
 
 #define POP_BRIDGE_COMMAND_QUEUE() \
   { \
@@ -94,6 +101,25 @@ public:
     const size_t writerChannelMemSize, const size_t writerChannelCmdQueueSize,
     const size_t writerChannelDataQueueSize, const size_t readerChannelMemSize,
     const size_t readerChannelCmdQueueSize, const size_t readerChannelDataQueueSize);
+  static inline void flushWriter() {
+    // The batch state belongs to whoever holds the channel lock. A wait can run on a thread other than
+    // the one pushing (game thread waiting for a Create reply while the render thread is mid-push), so
+    // take the lock unless this thread already owns it (flush from inside a Command, e.g. the data-ring
+    // overwrite wait). Channels that publish every push (batch 1, the server and the Module channel)
+    // never have anything pending and skip the lock entirely.
+    if (s_pWriterChannel && s_pWriterChannel->commands->getPublishBatch() > 1) {
+      if (s_pWriterChannel->m_mutex.owner() == bridge_util::curTid()) {
+        s_pWriterChannel->commands->flush();
+        return;
+      }
+      s_pWriterChannel->m_mutex.lock();
+      s_pWriterChannel->commands->flush();
+      s_pWriterChannel->m_mutex.unlock();
+    }
+  }
+  // The writer-channel lock doubles as the client's device lock (recursive, see util_ipcchannel.h).
+  static inline void lockWriter() { s_pWriterChannel->m_mutex.lock(); }
+  static inline void unlockWriter() { s_pWriterChannel->m_mutex.unlock(); }
   static inline const WriterChannel& getWriterChannel() {
     return *s_pWriterChannel;
   }

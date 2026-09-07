@@ -150,6 +150,76 @@ void Direct3DSwapChain9_LSS::onDestroy() {
   ClientMessage c(Commands::IDirect3DSwapChain9_Destroy, getId());
 }
 
+namespace {
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+#endif
+  // Client-side frame cap (bridge.conf clientFrameCap, fps; 0 = off). Runs on the game thread right after
+  // Present handed the frame to the server, so the server renders while the game sleeps. A high-resolution
+  // waitable timer covers all but the last millisecond, a spin the rest. A late frame restarts the cadence
+  // instead of being paid back with a short frame.
+  class FramePacer {
+  public:
+    void wait() {
+      const uint32_t fps = GlobalOptions::getClientFrameCap();
+      if (fps == 0) {
+        return;
+      }
+      if (!m_init) {
+        init(fps);
+      }
+      LARGE_INTEGER now;
+      QueryPerformanceCounter(&now);
+      const LONGLONG target = m_next;
+      if (now.QuadPart >= target) {
+        m_next = now.QuadPart + m_period;
+        return;
+      }
+      m_next = target + m_period;
+      if (m_timer != nullptr && target - now.QuadPart > m_spinTicks) {
+        LARGE_INTEGER due;
+        due.QuadPart = -((target - now.QuadPart - m_spinTicks) * 10000000LL / m_freq);
+        if (SetWaitableTimer(m_timer, &due, 0, nullptr, nullptr, FALSE)) {
+          WaitForSingleObject(m_timer, 50);
+        }
+      }
+      for (;;) {
+        QueryPerformanceCounter(&now);
+        if (now.QuadPart >= target) {
+          break;
+        }
+        YieldProcessor();
+      }
+    }
+  private:
+    void init(uint32_t fps) {
+      LARGE_INTEGER f;
+      QueryPerformanceFrequency(&f);
+      m_freq = f.QuadPart;
+      m_period = m_freq / fps;
+      m_timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+      m_spinTicks = m_freq / 1000;          // spin the last 1 ms with the high-resolution timer
+      if (m_timer == nullptr) {
+        m_timer = CreateWaitableTimerExW(nullptr, nullptr, 0, TIMER_ALL_ACCESS);
+        m_spinTicks = m_freq * 3 / 1000;    // coarse timer: leave 3 ms for the spin
+      }
+      LARGE_INTEGER now;
+      QueryPerformanceCounter(&now);
+      m_next = now.QuadPart + m_period;
+      m_init = true;
+      Logger::info(format_string("Client frame cap %u fps (%s timer)", fps,
+                                 m_spinTicks == m_freq / 1000 ? "high-resolution" : "coarse"));
+    }
+    bool m_init = false;
+    LONGLONG m_freq = 0;
+    LONGLONG m_period = 0;
+    LONGLONG m_spinTicks = 0;
+    LONGLONG m_next = 0;
+    HANDLE m_timer = nullptr;
+  };
+  FramePacer gFramePacer;
+}
+
 HRESULT Direct3DSwapChain9_LSS::Present(CONST RECT* pSourceRect, CONST RECT* pDestRect,
                                         HWND hDestWindowOverride, CONST RGNDATA* pDirtyRegion,
                                         DWORD dwFlags) {
@@ -158,6 +228,10 @@ HRESULT Direct3DSwapChain9_LSS::Present(CONST RECT* pSourceRect, CONST RECT* pDe
 #ifdef ENABLE_PRESENT_SEMAPHORE_TRACE
   Logger::trace(format_string("Present(): ClientMessage counter is at %d.", ClientMessage::get_counter()));
 #endif
+  {
+    const std::string stats = bridge_util::WaitStats::get().tick();
+    if (!stats.empty()) Logger::info(stats);
+  }
   ClientMessage::reset_counter();
   gSceneState = WaitBeginScene;
 
@@ -177,12 +251,16 @@ HRESULT Direct3DSwapChain9_LSS::Present(CONST RECT* pSourceRect, CONST RECT* pDe
     c.send_data(sizeof(RGNDATA), (void*) pDirtyRegion);
     c.send_data(dwFlags);
   }
+  // End of frame: hand the server everything batched so far (and before any Present-semaphore wait).
+  flushAllBridgeWriters();
 
   extern HRESULT syncOnPresent();
   const auto syncResult = syncOnPresent();
   if (syncResult == ERROR_SEM_TIMEOUT) {
     return ERROR_SEM_TIMEOUT;
   }
+
+  gFramePacer.wait();
 
   FrameMark;
 

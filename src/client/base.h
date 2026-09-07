@@ -154,7 +154,9 @@ class D3DRefCounted {
   // Using a 64-bit storage type by default to fully cover IUnknown's ULONG.
   // If we ever believe that a 16-bit external refcount is enough we may
   // switch to a 32-bit storage type for speed.
-  typedef uint64_t FusedStorageType;
+  // 2026-09-05: was uint64_t (two 32-bit counts). A 64-bit atomic RMW on x86 is a cmpxchg8b loop; 32 bits
+  // (two 16-bit counts, masked below) is one lock xadd. Every bind of a buffer/texture does two of these.
+  typedef uint32_t FusedStorageType;
   static constexpr size_t StorageBitwidth = sizeof(FusedStorageType) * 8;
   static constexpr size_t RefBitwidth = StorageBitwidth / 2;
 
@@ -214,7 +216,8 @@ private:
   // Extracts the actual refcount value from fused refcount.
   template<Ref type>
   static constexpr ULONG toRefValue(FusedStorageType cnt) {
-    return static_cast<ULONG>(cnt >> (static_cast<uint32_t>(type) * RefBitwidth));
+    constexpr FusedStorageType mask = (static_cast<FusedStorageType>(1) << RefBitwidth) - 1;
+    return static_cast<ULONG>((cnt >> (static_cast<uint32_t>(type) * RefBitwidth)) & mask);
   }
 
   // Creates the adjustment value for fused refcount depending on 
@@ -239,6 +242,7 @@ private:
 class D3DAutoPtr {
   D3DRefCounted* m_obj = nullptr;
 public:
+  D3DRefCounted* get() const { return m_obj; }
   D3DAutoPtr() = default;
 
   D3DAutoPtr(std::nullptr_t) {

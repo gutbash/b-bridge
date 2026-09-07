@@ -41,6 +41,35 @@ namespace bridge_util {
   class AtomicCircularQueue {
     std::atomic<uint32_t>* m_write;
     std::atomic<uint32_t>* m_read;
+    uint32_t m_cachedConsumer = 0;   // producer-local copy of *m_write (see push)
+    mutable uint32_t m_cachedProducer = 0;   // consumer-local copy of *m_read (see peek/pull)
+    // 2026-09-05 batched publish (producer side). *m_read is the index the consumer polls; storing it on
+    // every push hands the cache line (and the entry's line) to the other core once per command, which at
+    // ~70k commands/frame is the dominant per-command cost on both sides. The producer now writes entries
+    // against a private index and publishes every m_publishBatch pushes or on flush(). flush() MUST run
+    // before the producer blocks on anything the consumer has to do first (see flushAllBridgeWriters()).
+    uint32_t m_localWrite = 0;     // producer's private write index (>= published *m_read)
+    uint32_t m_pending = 0;        // entries written but not yet published
+    uint32_t m_publishBatch = 1;   // 1 = publish on every push (original behaviour)
+  public:
+    void setPublishBatch(uint32_t n) { m_publishBatch = n ? n : 1; }
+    uint32_t getPublishBatch() const { return m_publishBatch; }
+    void flush() {
+      if (m_pending) {
+        m_read->store(m_localWrite, std::memory_order_release);
+        m_pending = 0;
+      }
+    }
+    // Idle accounting (consumer side): time spent spinning in peek/pull with nothing to read.
+    mutable uint64_t m_idleUs = 0;
+    mutable uint64_t m_idleEntries = 0;
+    static uint64_t nowUs() {
+      static LARGE_INTEGER f = [] { LARGE_INTEGER x; QueryPerformanceFrequency(&x); return x; }();
+      LARGE_INTEGER c; QueryPerformanceCounter(&c);
+      return (uint64_t) (c.QuadPart * 1000000ULL / f.QuadPart);
+    }
+  private:
+    T m_lastPulled = {};
 
     T* m_data;
     T m_default;
@@ -89,17 +118,27 @@ namespace bridge_util {
       ULONGLONG start = 0, curTick;
       const DWORD timeoutMS = GlobalOptions::getCommandTimeout();
       do {
-        const auto currentRead = m_read->load(std::memory_order_relaxed);
-        const auto nextRead = queueIdxInc(currentRead);
-        if (nextRead != m_write->load(std::memory_order_acquire)) {
-          m_data[currentRead] = obj;
-          // The store above is not atomic. Issue a membar after it to ensure
-          // it is not reordered.
-          std::atomic_thread_fence(std::memory_order_seq_cst);
-          m_read->store(nextRead, std::memory_order_release);
+        const auto nextWrite = queueIdxInc(m_localWrite);
+        // 2026-09-05: the consumer index lives on a cache line the other process writes on every pop;
+        // reading it per push cost a cross-core miss per command (58k commands/frame in GTA IV).
+        // Keep a producer-local copy and only re-read the shared index when the copy says "full".
+        if (nextWrite == m_cachedConsumer) {
+          m_cachedConsumer = m_write->load(std::memory_order_acquire);
+        }
+        if (nextWrite != m_cachedConsumer) {
+          m_data[m_localWrite] = obj;
+          m_localWrite = nextWrite;
+          // The element store is ordered before the index publish by the release store (x86: stores
+          // are not reordered with other stores); no full fence needed.
+          if (++m_pending >= m_publishBatch) {
+            m_read->store(m_localWrite, std::memory_order_release);
+            m_pending = 0;
+          }
           return Result::Success;
         }
 
+        // Full: publish what we hold so the consumer can drain it, then wait.
+        flush();
         std::this_thread::yield();
 
         curTick = GetTickCount64();
@@ -117,15 +156,21 @@ namespace bridge_util {
     // Returns a ref to the first element in the queue
     // Note: Blocks if the queue is empty
     const T& peek(Result& result, const DWORD timeoutMS = 0, std::atomic<bool>* const pbEarlyOutSignal = nullptr) const {
+      uint64_t idleT0 = 0;
       ULONGLONG start = 0, curTick;
       do {
         const auto currentWrite = m_write->load(std::memory_order_relaxed);
-        if (currentWrite != m_read->load(std::memory_order_acquire)) {
-          // Issue a membar before reading the data since it is not atomic
-          std::atomic_thread_fence(std::memory_order_seq_cst);
+        // Consumer-local copy of the producer index (see push): only touch the shared line when the
+        // copy says the queue is empty.
+        if (currentWrite == m_cachedProducer) {
+          m_cachedProducer = m_read->load(std::memory_order_acquire);
+        }
+        if (currentWrite != m_cachedProducer) {
+          if (idleT0) { m_idleUs += nowUs() - idleT0; }
           result = Result::Success;
           return m_data[currentWrite];
         }
+        if (!idleT0) { idleT0 = nowUs(); m_idleEntries++; }
 
         std::this_thread::yield();
 
@@ -149,12 +194,18 @@ namespace bridge_util {
       ULONGLONG start = 0, curTick;
       do {
         const auto currentWrite = m_write->load(std::memory_order_relaxed);
-        if (currentWrite != m_read->load(std::memory_order_acquire)) {
+        // Consumer-local copy of the producer index (see push): only touch the shared line when the
+        // copy says the queue is empty.
+        if (currentWrite == m_cachedProducer) {
+          m_cachedProducer = m_read->load(std::memory_order_acquire);
+        }
+        if (currentWrite != m_cachedProducer) {
+          // Copy out before publishing the slot back to the producer (the old code returned a
+          // reference into a slot the producer could overwrite); a header copy is cheaper than the fence.
+          m_lastPulled = m_data[currentWrite];
           m_write->store(queueIdxInc(currentWrite), std::memory_order_release);
-          // Issue a membar before reading the data since it is not atomic
-          std::atomic_thread_fence(std::memory_order_seq_cst);
           result = Result::Success;
-          return m_data[currentWrite];
+          return m_lastPulled;
         }
 
         std::this_thread::yield();
@@ -194,7 +245,7 @@ namespace bridge_util {
     }
 
     std::vector<Commands::D3D9Command> getWriterQueueData(int maxQueueElements=10) {
-      const auto currentRead = m_read->load(std::memory_order_relaxed);
+      const auto currentRead = m_localWrite;   // includes entries not yet published
       int currentIndex = queueIdxDec(currentRead);
       return buildQueueData(maxQueueElements, currentIndex);
     }

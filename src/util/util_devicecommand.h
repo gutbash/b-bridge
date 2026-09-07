@@ -38,6 +38,8 @@ static void initDeviceBridge() {
                      GlobalOptions::getServerChannelMemSize(),
                      GlobalOptions::getServerCmdQueueSize(),
                      GlobalOptions::getServerDataQueueSize());
+  // Batched index publish on the client's command queue (see AtomicCircularQueue::flush).
+  DeviceBridge::getWriterChannel().commands->setPublishBatch(GlobalOptions::getClientCmdPublishBatch());
 #elif defined(REMIX_BRIDGE_SERVER)
                      GlobalOptions::getServerChannelMemSize(),
                      GlobalOptions::getServerCmdQueueSize(),

@@ -125,6 +125,9 @@ bool gOverwriteConditionAlreadyActive = false;
 
 // Mapping between client and server pointer addresses
 std::unordered_map<uint32_t, IDirect3DDevice9*> gpD3DDevices;
+// Count of headers pulled from the client's Device channel = the client's UID for the next command
+// (handshake SYN/CONTINUE included). Replaces the per-command UID word in the data ring (2026-09-05).
+static UINT g_rxUID = 0;
 std::unordered_map<uint32_t, IDirect3DResource9*> gpD3DResources; // For Textures, Buffers, and Surfaces
 std::unordered_map<uint32_t, IDirect3DVolume9*> gpD3DVolumes;
 std::unordered_map<uint32_t, IDirect3DVertexDeclaration9*> gpD3DVertexDeclarations;
@@ -271,11 +274,31 @@ static bool dumpLeakedObjects() {
   return anyLeaked;
 }
 
+// 2026-09-04 local: name the failing D3D9 call. assert() is compiled out in release, so a failed
+// call used to leave no trace beyond an unlabelled BridgeAssert line.
+// Rate-limited: GTA IV binds a non-RT surface ~3x/frame (rejected in-process too); logging every one cost
+// the server thread a file write per failure. Log the first 20 of each command, then every 4096th.
+static uint32_t g_hrFailCount[1024] = {};
+#define CHECK_HR(hr) do { if (FAILED(hr)) {     const uint32_t ci = (uint32_t) rpcHeader.command < 1024 ? (uint32_t) rpcHeader.command : 1023;     const uint32_t nf = ++g_hrFailCount[ci];     if (nf <= 20 || (nf & 4095) == 0) { Logger::err(format_string("D3D9 call FAILED: %s hr=0x%08x UID=%u (n=%u)", toString(rpcHeader.command).c_str(), (unsigned)(hr), (unsigned)currentUID, nf)); }   } assert(SUCCEEDED(hr)); } while (0)
 void ProcessDeviceCommandQueue() {
   // Loop until the client sends terminate instruction
   bool done = false;
+  static uint64_t s_statCmds = 0, s_statT0 = 0, s_statIdle0 = 0;
   while (!done && DeviceBridge::waitForCommand() == Result::Success) {
     ZoneScopedN("Process Command");
+    if ((++s_statCmds & 255) == 0) {   // sample the clock every 256 commands: QPC per command would cost ~2 ms/frame here
+      auto& q = *DeviceBridge::getReaderChannel().commands;
+      const uint64_t now = q.nowUs();
+      if (s_statT0 == 0) { s_statT0 = now; s_statIdle0 = q.m_idleUs; }
+      else if (now - s_statT0 >= 5000000) {
+        const double secs = (now - s_statT0) / 1e6;
+        const uint64_t idle = q.m_idleUs - s_statIdle0;
+        Logger::info(format_string("[srvstats] %llu cmds in %.2f s, idle %.1f ms (%.1f%%), busy %.1f%%, %.0f ns/cmd busy",
+          (unsigned long long) s_statCmds, secs, idle / 1000.0, idle / 1e4 / secs, 100.0 - idle / 1e4 / secs,
+          s_statCmds ? ((secs * 1e6 - idle) * 1000.0 / s_statCmds) : 0.0));
+        s_statCmds = 0; s_statT0 = now; s_statIdle0 = q.m_idleUs;
+      }
+    }
 #ifdef LOG_SERVER_COMMAND_TIME
     // Take a snapshot of the current tick count for profiling purposes
     const auto start = GetTickCount64();
@@ -299,7 +322,10 @@ void ProcessDeviceCommandQueue() {
         const std::string commandStr = toString(rpcHeader.command);
         ZoneName(commandStr.c_str(), commandStr.size());
       }
-      PULL_U(currentUID);
+      // 2026-09-05: the client no longer pushes its UID through the data ring; the queue is a strict FIFO,
+      // so the number of headers pulled so far IS the client's UID for this command (client side: s_cmdUID
+      // advances only for headers actually pushed).
+      const UINT currentUID = g_rxUID++;
 #if defined(_DEBUG) || defined(DEBUGOPT)
       if (GlobalOptions::getLogServerCommands()) {
         Logger::info("Device Processing: " + toString(rpcHeader.command) + " UID: " + std::to_string(currentUID));
@@ -327,6 +353,10 @@ void ProcessDeviceCommandQueue() {
           std::stringstream ss;
           ss << format_string("CreateDeviceEx() call failed with error code 0x%x", hresult) << std::endl;
           Logger::err(ss.str());
+          Logger::err(format_string("  pres params: %ux%u fmt=%u count=%u ms=%u/%u swap=%u windowed=%d autoDS=%d/%u flags=0x%x hz=%u interval=0x%x",
+            PresentationParameters.BackBufferWidth, PresentationParameters.BackBufferHeight, (unsigned)PresentationParameters.BackBufferFormat, PresentationParameters.BackBufferCount,
+            (unsigned)PresentationParameters.MultiSampleType, PresentationParameters.MultiSampleQuality, (unsigned)PresentationParameters.SwapEffect, (int)PresentationParameters.Windowed,
+            (int)PresentationParameters.EnableAutoDepthStencil, (unsigned)PresentationParameters.AutoDepthStencilFormat, PresentationParameters.Flags, PresentationParameters.FullScreen_RefreshRateInHz, PresentationParameters.PresentationInterval));
         } else {
           Logger::info("Server side D3D9 DeviceEx created successfully!");
           gpD3DDevices[pHandle] = pD3DDevice;
@@ -362,6 +392,10 @@ void ProcessDeviceCommandQueue() {
           std::stringstream ss;
           ss << format_string("CreateDevice() call failed with error code 0x%x", hresult) << std::endl;
           Logger::err(ss.str());
+          Logger::err(format_string("  pres params: %ux%u fmt=%u count=%u ms=%u/%u swap=%u windowed=%d autoDS=%d/%u flags=0x%x hz=%u interval=0x%x",
+            PresentationParameters.BackBufferWidth, PresentationParameters.BackBufferHeight, (unsigned)PresentationParameters.BackBufferFormat, PresentationParameters.BackBufferCount,
+            (unsigned)PresentationParameters.MultiSampleType, PresentationParameters.MultiSampleQuality, (unsigned)PresentationParameters.SwapEffect, (int)PresentationParameters.Windowed,
+            (int)PresentationParameters.EnableAutoDepthStencil, (unsigned)PresentationParameters.AutoDepthStencilFormat, PresentationParameters.Flags, PresentationParameters.FullScreen_RefreshRateInHz, PresentationParameters.PresentationInterval));
         } else {
           Logger::info("Server side D3D9 Device created successfully!");
           gpD3DDevices[pHandle] = (IDirect3DDevice9Ex*) pD3DDevice;
@@ -412,7 +446,7 @@ void ProcessDeviceCommandQueue() {
         if (SUCCEEDED(hresult)) {
           gpD3DResources[pHandle] = pSurface;
         }
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         SEND_OPTIONAL_CREATE_FUNCTION_SERVER_RESPONSE(hresult, currentUID);
         break;
       }
@@ -430,7 +464,7 @@ void ProcessDeviceCommandQueue() {
         if (SUCCEEDED(hresult)) {
           gpD3DResources[pHandle] = pSurface;
         }
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         SEND_OPTIONAL_CREATE_FUNCTION_SERVER_RESPONSE(hresult, currentUID);
         break;
       }
@@ -450,7 +484,7 @@ void ProcessDeviceCommandQueue() {
         if (SUCCEEDED(hresult)) {
           gpD3DResources[pHandle] = pSurface;
         }
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         SEND_OPTIONAL_CREATE_FUNCTION_SERVER_RESPONSE(hresult, currentUID);
         break;
       }
@@ -479,7 +513,7 @@ void ProcessDeviceCommandQueue() {
         if (SUCCEEDED(hresult)) {
           gpD3DResources[pSurfaceHandle] = pBackbuffer;
         }
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         break;
       }
       case IDirect3DDevice9Ex_LinkAutoDepthStencil:
@@ -491,7 +525,7 @@ void ProcessDeviceCommandQueue() {
         if (SUCCEEDED(hresult)) {
           gpD3DResources[pSurfaceHandle] = pDepthStencil;
         }
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         break;
       }
       case IDirect3DDevice9Ex_QueryInterface:
@@ -509,7 +543,7 @@ void ProcessDeviceCommandQueue() {
       {
         GET_RES(pD3DDevice, gpD3DDevices);
         const auto hresult = pD3DDevice->TestCooperativeLevel();
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         break;
       }
       case IDirect3DDevice9Ex_GetAvailableTextureMem:
@@ -526,7 +560,7 @@ void ProcessDeviceCommandQueue() {
       {
         GET_RES(pD3DDevice, gpD3DDevices);
         auto const hresult = pD3DDevice->EvictManagedResources();
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         SEND_OPTIONAL_SERVER_RESPONSE(hresult, currentUID);
         break;
       }
@@ -535,7 +569,7 @@ void ProcessDeviceCommandQueue() {
         GET_RES(pD3DDevice, gpD3DDevices);
         IDirect3D9* pD3D = nullptr;
         const auto hresult = pD3DDevice->GetDirect3D(OUT & pD3D);
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         assert(gpD3D == pD3D); // The two pointers should be identical
         break;
       }
@@ -628,7 +662,7 @@ void ProcessDeviceCommandQueue() {
         PULL_U(iSwapChain);
         IDirect3DSwapChain9* pSwapChain = nullptr;
         const auto hresult = pD3DDevice->GetSwapChain(iSwapChain, &pSwapChain);
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         assert(pSwapChain != nullptr);
         break;
       }
@@ -657,7 +691,7 @@ void ProcessDeviceCommandQueue() {
         pSwapChain->Release();
 
         const auto hresult = pD3DDevice->Reset(&PresentationParameters);
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         SEND_OPTIONAL_SERVER_RESPONSE(hresult, currentUID);
         break;
       }
@@ -682,7 +716,7 @@ void ProcessDeviceCommandQueue() {
         pSwapChain->Release();
 
         const auto hresult = ((IDirect3DDevice9Ex*) pD3DDevice)->ResetEx(&PresentationParameters, pFullscreenDisplayMode);
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         SEND_OPTIONAL_SERVER_RESPONSE(hresult, currentUID);
         break;
       }
@@ -725,7 +759,7 @@ void ProcessDeviceCommandQueue() {
         PULL_HND(pSurfaceHandle);
         IDirect3DSurface9* pBackbuffer = nullptr;
         const auto hresult = pD3DDevice->GetBackBuffer(iSwapChain, iBackBuffer, D3DBACKBUFFER_TYPE_MONO, &pBackbuffer);
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         if (SUCCEEDED(hresult)) {
           gpD3DResources[pSurfaceHandle] = pBackbuffer;
         }
@@ -739,7 +773,7 @@ void ProcessDeviceCommandQueue() {
         PULL(BOOL, bEnableDialogs);
         const auto hresult = pD3DDevice->SetDialogBoxMode(bEnableDialogs);
         SEND_OPTIONAL_SERVER_RESPONSE(hresult, currentUID);
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         break;
       }
       case IDirect3DDevice9Ex_SetGammaRamp:
@@ -774,7 +808,7 @@ void ProcessDeviceCommandQueue() {
         if (SUCCEEDED(hresult)) {
           gpD3DResources[pHandle] = pTexture;
         }
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         SEND_OPTIONAL_CREATE_FUNCTION_SERVER_RESPONSE(hresult, currentUID);
         break;
       }
@@ -794,7 +828,7 @@ void ProcessDeviceCommandQueue() {
         if (SUCCEEDED(hresult)) {
           gpD3DResources[pHandle] = pVolumeTexture;
         }
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         SEND_OPTIONAL_CREATE_FUNCTION_SERVER_RESPONSE(hresult, currentUID);
         break;
       }
@@ -812,7 +846,7 @@ void ProcessDeviceCommandQueue() {
         if (SUCCEEDED(hresult)) {
           gpD3DResources[pHandle] = pCubeTexture;
         }
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         SEND_OPTIONAL_CREATE_FUNCTION_SERVER_RESPONSE(hresult, currentUID);
         break;
       }
@@ -829,7 +863,7 @@ void ProcessDeviceCommandQueue() {
         if (SUCCEEDED(hresult)) {
           gpD3DResources[pHandle] = pVertexBuffer;
         }
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         SEND_OPTIONAL_CREATE_FUNCTION_SERVER_RESPONSE(hresult, currentUID);
         break;
       }
@@ -846,7 +880,7 @@ void ProcessDeviceCommandQueue() {
         if (SUCCEEDED(hresult)) {
           gpD3DResources[pHandle] = pIndexBuffer;
         }
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         SEND_OPTIONAL_CREATE_FUNCTION_SERVER_RESPONSE(hresult, currentUID);
         break;
       }
@@ -865,7 +899,7 @@ void ProcessDeviceCommandQueue() {
         if (SUCCEEDED(hresult)) {
           gpD3DResources[pHandle] = pSurface;
         }
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         SEND_OPTIONAL_CREATE_FUNCTION_SERVER_RESPONSE(hresult, currentUID);
         break;
       }
@@ -884,7 +918,7 @@ void ProcessDeviceCommandQueue() {
         if (SUCCEEDED(hresult)) {
           gpD3DResources[pHandle] = pSurface;
         }
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         SEND_OPTIONAL_CREATE_FUNCTION_SERVER_RESPONSE(hresult, currentUID);
         break;
       }
@@ -902,7 +936,7 @@ void ProcessDeviceCommandQueue() {
         assert(pDestinationSurface != nullptr);
         if (pSourceSurface != nullptr && pDestinationSurface != nullptr) {
           hresult = pD3DDevice->UpdateSurface(IN pSourceSurface, IN pSourceRect, IN pDestinationSurface, IN pDestPoint);
-          assert(SUCCEEDED(hresult));
+          CHECK_HR(hresult);
         }
         SEND_OPTIONAL_SERVER_RESPONSE(hresult, currentUID);
         break;
@@ -919,7 +953,7 @@ void ProcessDeviceCommandQueue() {
         assert(pDestinationTexture != nullptr);
         if (pSourceTexture != nullptr && pDestinationTexture != nullptr) {
           hresult = pD3DDevice->UpdateTexture(IN pSourceTexture, IN pDestinationTexture);
-          assert(SUCCEEDED(hresult));
+          CHECK_HR(hresult);
         }
         SEND_OPTIONAL_SERVER_RESPONSE(hresult, currentUID);
         break;
@@ -933,7 +967,7 @@ void ProcessDeviceCommandQueue() {
         const auto& pDestSurface = (IDirect3DSurface9*) gpD3DResources[pDestSurfaceHandle];
         auto hresult = pD3DDevice->GetRenderTargetData(IN pRenderTarget, IN pDestSurface);
         hresult = ReturnSurfaceDataToClient(pDestSurface, hresult, currentUID);
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         break;
       }
       case IDirect3DDevice9Ex_GetFrontBufferData:
@@ -945,7 +979,7 @@ void ProcessDeviceCommandQueue() {
         IDirect3DSurface9* pBackbuffer = nullptr;
         auto hresult = pD3DDevice->GetFrontBufferData(IN iSwapChain, IN pDestSurface);
         hresult = ReturnSurfaceDataToClient(pDestSurface, hresult, currentUID);
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         break;
       }
       case IDirect3DDevice9Ex_StretchRect:
@@ -959,7 +993,7 @@ void ProcessDeviceCommandQueue() {
         const auto& pSourceSurface = (IDirect3DSurface9*) gpD3DResources[pSourceHandle];
         const auto& pDestSurface = (IDirect3DSurface9*) gpD3DResources[pDestHandle];
         const auto hresult = pD3DDevice->StretchRect(IN pSourceSurface, IN pSourceRect, IN pDestSurface, IN pDestRect, IN Filter);
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         SEND_OPTIONAL_SERVER_RESPONSE(hresult, currentUID);
         break;
       }
@@ -971,7 +1005,7 @@ void ProcessDeviceCommandQueue() {
         PULL_OBJ(D3DCOLOR, color);
         const auto& pSurface = (IDirect3DSurface9*) gpD3DResources[pHandle];
         const auto hresult = pD3DDevice->ColorFill(IN pSurface, IN pRect, IN * color);
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         SEND_OPTIONAL_SERVER_RESPONSE(hresult, currentUID);
         break;
       }
@@ -988,7 +1022,7 @@ void ProcessDeviceCommandQueue() {
         if (SUCCEEDED(hresult)) {
           gpD3DResources[pHandle] = pSurface;
         }
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         SEND_OPTIONAL_CREATE_FUNCTION_SERVER_RESPONSE(hresult, currentUID);
         break;
       }
@@ -1005,7 +1039,7 @@ void ProcessDeviceCommandQueue() {
         assert((pHandle != 0 && pRenderTarget != 0) || pHandle == 0);
         if ((pHandle != 0 && pRenderTarget != 0) || pHandle == 0) {
           hresult = pD3DDevice->SetRenderTarget(IN RenderTargetIndex, IN pRenderTarget);
-          assert(SUCCEEDED(hresult));
+          CHECK_HR(hresult);
         }
         SEND_OPTIONAL_SERVER_RESPONSE(hresult, currentUID);
         break;
@@ -1021,7 +1055,7 @@ void ProcessDeviceCommandQueue() {
           gpD3DResources[pSurfaceHandle] = pRenderTarget;
         }
         SEND_OPTIONAL_SERVER_RESPONSE(hresult, currentUID);
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         break;
       }
       case IDirect3DDevice9Ex_SetDepthStencilSurface:
@@ -1036,7 +1070,7 @@ void ProcessDeviceCommandQueue() {
         assert((pHandle != 0 && pDepthStencil != 0) || pHandle == 0);
         if ((pHandle != 0 && pDepthStencil != 0) || pHandle == 0) {
           hresult = pD3DDevice->SetDepthStencilSurface(IN pDepthStencil);
-          assert(SUCCEEDED(hresult));
+          CHECK_HR(hresult);
         }
         SEND_OPTIONAL_SERVER_RESPONSE(hresult, currentUID);
         break;
@@ -1050,7 +1084,7 @@ void ProcessDeviceCommandQueue() {
         if (SUCCEEDED(hresult)) {
           gpD3DResources[pSurfaceHandle] = pZStencilSurface;
         }
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         SEND_OPTIONAL_SERVER_RESPONSE(hresult, currentUID);
         break;
       }
@@ -1058,7 +1092,7 @@ void ProcessDeviceCommandQueue() {
       {
         GET_RES(pD3DDevice, gpD3DDevices);
         const auto hresult = pD3DDevice->BeginScene();
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         SEND_OPTIONAL_SERVER_RESPONSE(hresult, currentUID);
         break;
       }
@@ -1066,7 +1100,7 @@ void ProcessDeviceCommandQueue() {
       {
         GET_RES(pD3DDevice, gpD3DDevices);
         const auto hresult = pD3DDevice->EndScene();
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         SEND_OPTIONAL_SERVER_RESPONSE(hresult, currentUID);
         break;
       }
@@ -1082,7 +1116,7 @@ void ProcessDeviceCommandQueue() {
         D3DCOLOR* Color = nullptr;
         PULL_DATA(sizeof(D3DCOLOR), Color);
         const auto hresult = pD3DDevice->Clear(Count, pRects, Flags, *Color, *Z, Stencil);
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         SEND_OPTIONAL_SERVER_RESPONSE(hresult, currentUID);
         break;
       }
@@ -1093,7 +1127,7 @@ void ProcessDeviceCommandQueue() {
         D3DMATRIX* pMatrix = nullptr;
         PULL_DATA(sizeof(D3DMATRIX), pMatrix);
         const auto hresult = pD3DDevice->SetTransform(State, pMatrix);
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         SEND_OPTIONAL_SERVER_RESPONSE(hresult, currentUID);
         break;
       }
@@ -1106,7 +1140,7 @@ void ProcessDeviceCommandQueue() {
         GET_RES(pD3DDevice, gpD3DDevices);
         PULL_OBJ(D3DVIEWPORT9, pViewport);
         const auto hresult = pD3DDevice->SetViewport(pViewport);
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         SEND_OPTIONAL_SERVER_RESPONSE(hresult, currentUID);
         break;
       }
@@ -1118,7 +1152,7 @@ void ProcessDeviceCommandQueue() {
         D3DMATERIAL9* pMaterial = nullptr;
         PULL_DATA(sizeof(D3DMATERIAL9), pMaterial);
         const auto hresult = pD3DDevice->SetMaterial(IN pMaterial);
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         SEND_OPTIONAL_SERVER_RESPONSE(hresult, currentUID);
         break;
       }
@@ -1131,7 +1165,7 @@ void ProcessDeviceCommandQueue() {
         D3DLIGHT9* pLight = nullptr;
         PULL_DATA(sizeof(D3DLIGHT9), pLight);
         const auto hresult = pD3DDevice->SetLight(IN Index, IN pLight);
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         SEND_OPTIONAL_SERVER_RESPONSE(hresult, currentUID);
         break;
       }
@@ -1143,7 +1177,7 @@ void ProcessDeviceCommandQueue() {
         PULL_D(LightIndex);
         PULL_U(bEnable);
         const auto hresult = pD3DDevice->LightEnable(IN LightIndex, IN bEnable);
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         SEND_OPTIONAL_SERVER_RESPONSE(hresult, currentUID);
         break;
       }
@@ -1156,19 +1190,67 @@ void ProcessDeviceCommandQueue() {
         float* pPlane = nullptr;
         PULL_DATA(sizeof(float) * 4, pPlane);
         const auto hresult = pD3DDevice->SetClipPlane(IN Index, IN pPlane);
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         SEND_OPTIONAL_SERVER_RESPONSE(hresult, currentUID);
         break;
       }
       case IDirect3DDevice9Ex_GetClipPlane:
         break;
+      case IDirect3DDevice9Ex_StateBatch:
+      {
+        // 2026-09-06: replay of the client's batched hot setters; record = command | (argWords << 16), args.
+        GET_RES(pD3DDevice, gpD3DDevices);
+        uint32_t* p = nullptr;
+        const uint32_t len = DeviceBridge::get_data((void**) &p);
+        const uint32_t* end = p + len / sizeof(uint32_t);
+        while (p < end) {
+          const uint32_t w = *p++;
+          const auto cmd = (Commands::D3D9Command) (w & 0xFFFF);
+          const uint32_t n = w >> 16;
+          if (p + n > end) { Logger::err("StateBatch: truncated record"); break; }
+          switch (cmd) {
+          case IDirect3DDevice9Ex_SetRenderState:
+            pD3DDevice->SetRenderState((D3DRENDERSTATETYPE) p[0], p[1]); break;
+          case IDirect3DDevice9Ex_SetSamplerState:
+            pD3DDevice->SetSamplerState(p[0], (D3DSAMPLERSTATETYPE) p[1], p[2]); break;
+          case IDirect3DDevice9Ex_SetTextureStageState:
+            pD3DDevice->SetTextureStageState(p[0], (D3DTEXTURESTAGESTATETYPE) p[1], p[2]); break;
+          case IDirect3DDevice9Ex_SetTexture:
+          {
+            IDirect3DBaseTexture9* pTexture = p[1] ? (IDirect3DBaseTexture9*) gpD3DResources[p[1]] : nullptr;
+            pD3DDevice->SetTexture(p[0], pTexture); break;
+          }
+          case IDirect3DDevice9Ex_SetVertexDeclaration:
+            pD3DDevice->SetVertexDeclaration(p[0] ? (IDirect3DVertexDeclaration9*) gpD3DVertexDeclarations[p[0]] : nullptr); break;
+          case IDirect3DDevice9Ex_SetVertexShader:
+            pD3DDevice->SetVertexShader(p[0] ? gpD3DVertexShaders[p[0]] : nullptr); break;
+          case IDirect3DDevice9Ex_SetPixelShader:
+            pD3DDevice->SetPixelShader(p[0] ? gpD3DPixelShaders[p[0]] : nullptr); break;
+          case IDirect3DDevice9Ex_SetIndices:
+            pD3DDevice->SetIndices(p[0] ? (IDirect3DIndexBuffer9*) gpD3DResources[p[0]] : nullptr); break;
+          case IDirect3DDevice9Ex_SetStreamSource:
+            pD3DDevice->SetStreamSource(p[0], p[1] ? (IDirect3DVertexBuffer9*) gpD3DResources[p[1]] : nullptr, p[2], p[3]); break;
+          case IDirect3DDevice9Ex_SetStreamSourceFreq:
+            pD3DDevice->SetStreamSourceFreq(p[0], p[1]); break;
+          case IDirect3DDevice9Ex_SetVertexShaderConstantF:
+            pD3DDevice->SetVertexShaderConstantF(p[0], (const float*) (p + 2), p[1]); break;
+          case IDirect3DDevice9Ex_SetPixelShaderConstantF:
+            pD3DDevice->SetPixelShaderConstantF(p[0], (const float*) (p + 2), p[1]); break;
+          default:
+            Logger::err(format_string("StateBatch: unknown record %u", (uint32_t) cmd));
+            p = (uint32_t*) end; break;
+          }
+          p += n;
+        }
+        break;
+      }
       case IDirect3DDevice9Ex_SetRenderState:
       {
         GET_RES(pD3DDevice, gpD3DDevices);
         PULL(D3DRENDERSTATETYPE, State);
         PULL_D(Value);
         const auto hresult = pD3DDevice->SetRenderState(IN State, IN Value);
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         SEND_OPTIONAL_SERVER_RESPONSE(hresult, currentUID);
         break;
       }
@@ -1184,7 +1266,7 @@ void ProcessDeviceCommandQueue() {
         if (SUCCEEDED(hresult)) {
           gpD3DStateBlocks[pHandle] = pSB;
         }
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         SEND_OPTIONAL_CREATE_FUNCTION_SERVER_RESPONSE(hresult, currentUID);
         break;
       }
@@ -1192,7 +1274,7 @@ void ProcessDeviceCommandQueue() {
       {
         GET_RES(pD3DDevice, gpD3DDevices);
         const auto hresult = pD3DDevice->BeginStateBlock();
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         SEND_OPTIONAL_SERVER_RESPONSE(hresult, currentUID);
         break;
       }
@@ -1205,7 +1287,7 @@ void ProcessDeviceCommandQueue() {
         if (SUCCEEDED(hresult)) {
           gpD3DStateBlocks[pHandle] = pSB;
         }
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         SEND_OPTIONAL_SERVER_RESPONSE(hresult, currentUID);
         break;
       }
@@ -1226,7 +1308,7 @@ void ProcessDeviceCommandQueue() {
           assert(pTexture != nullptr);
         }
         const auto hresult = pD3DDevice->SetTexture(IN Stage, IN pTexture);
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         SEND_OPTIONAL_SERVER_RESPONSE(hresult, currentUID);
         break;
       }
@@ -1239,7 +1321,7 @@ void ProcessDeviceCommandQueue() {
         PULL(D3DTEXTURESTAGESTATETYPE, Type);
         PULL_D(Value);
         const auto hresult = pD3DDevice->SetTextureStageState(IN Stage, IN Type, IN Value);
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         SEND_OPTIONAL_SERVER_RESPONSE(hresult, currentUID);
         break;
       }
@@ -1252,7 +1334,7 @@ void ProcessDeviceCommandQueue() {
         PULL(D3DSAMPLERSTATETYPE, Type);
         PULL_D(Value);
         const auto hresult = pD3DDevice->SetSamplerState(IN Sampler, IN Type, IN Value);
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         SEND_OPTIONAL_SERVER_RESPONSE(hresult, currentUID);
         break;
       }
@@ -1271,7 +1353,7 @@ void ProcessDeviceCommandQueue() {
         GET_RES(pD3DDevice, gpD3DDevices);
         PULL_OBJ(RECT, pRect);
         const auto hresult = pD3DDevice->SetScissorRect(pRect);
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         SEND_OPTIONAL_SERVER_RESPONSE(hresult, currentUID);
         break;
       }
@@ -1282,7 +1364,7 @@ void ProcessDeviceCommandQueue() {
         GET_RES(pD3DDevice, gpD3DDevices);
         PULL(BOOL, bSoftware);
         const auto hresult = pD3DDevice->SetSoftwareVertexProcessing(bSoftware);
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         {
           ServerMessage c(Commands::Bridge_Response, currentUID);
           c.send_data(hresult);
@@ -1296,7 +1378,7 @@ void ProcessDeviceCommandQueue() {
         GET_RES(pD3DDevice, gpD3DDevices);
         PULL_OBJ(float, nSegments);
         const auto hresult = pD3DDevice->SetNPatchMode(*nSegments);
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         SEND_OPTIONAL_SERVER_RESPONSE(hresult, currentUID);
         break;
       }
@@ -1309,7 +1391,7 @@ void ProcessDeviceCommandQueue() {
         PULL_U(StartVertex);
         PULL_U(PrimitiveCount);
         const auto hresult = pD3DDevice->DrawPrimitive(IN PrimitiveType, IN StartVertex, IN PrimitiveCount);
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         SEND_OPTIONAL_SERVER_RESPONSE(hresult, currentUID);
         break;
       }
@@ -1323,7 +1405,7 @@ void ProcessDeviceCommandQueue() {
         PULL_U(startIndex);
         PULL_U(primCount);
         const auto hresult = pD3DDevice->DrawIndexedPrimitive(IN Type, IN BaseVertexIndex, IN MinVertexIndex, IN NumVertices, IN startIndex, IN primCount);
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         SEND_OPTIONAL_SERVER_RESPONSE(hresult, currentUID);
         break;
       }
@@ -1336,7 +1418,7 @@ void ProcessDeviceCommandQueue() {
         DeviceBridge::get_data(&pVertexStreamZeroData);
         PULL_U(VertexStreamZeroStride);
         const auto hresult = pD3DDevice->DrawPrimitiveUP(IN PrimitiveType, IN PrimitiveCount, IN pVertexStreamZeroData, IN VertexStreamZeroStride);
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         SEND_OPTIONAL_SERVER_RESPONSE(hresult, currentUID);
         break;
       }
@@ -1356,7 +1438,7 @@ void ProcessDeviceCommandQueue() {
         DeviceBridge::get_data(&pVertexStreamZeroData);
 
         const auto hresult = pD3DDevice->DrawIndexedPrimitiveUP(IN PrimitiveType, IN MinVertexIndex, IN NumVertices, IN PrimitiveCount, IN pIndexData, IN IndexDataFormat, IN pVertexStreamZeroData, IN VertexStreamZeroStride);
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         SEND_OPTIONAL_SERVER_RESPONSE(hresult, currentUID);
         break;
       }
@@ -1374,7 +1456,7 @@ void ProcessDeviceCommandQueue() {
         const auto& pDestBuffer = (IDirect3DVertexBuffer9*) gpD3DResources[pVertexBufferHandle];
 
         const auto hresult = pD3DDevice->ProcessVertices(SrcStartIndex, DestIndex, VertexCount, pDestBuffer, pVertexDecl, Flags);
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         SEND_OPTIONAL_SERVER_RESPONSE(hresult, currentUID);
         break;
       }
@@ -1390,7 +1472,7 @@ void ProcessDeviceCommandQueue() {
         if (SUCCEEDED(hresult)) {
           gpD3DVertexDeclarations[pHandle] = pDecl;
         }
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         SEND_OPTIONAL_CREATE_FUNCTION_SERVER_RESPONSE(hresult, currentUID);
         break;
       }
@@ -1403,7 +1485,7 @@ void ProcessDeviceCommandQueue() {
           pVertexDecl = (IDirect3DVertexDeclaration9*) gpD3DVertexDeclarations[pHandle];
         }
         const auto hresult = pD3DDevice->SetVertexDeclaration(IN pVertexDecl);
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         SEND_OPTIONAL_SERVER_RESPONSE(hresult, currentUID);
         break;
       }
@@ -1414,7 +1496,7 @@ void ProcessDeviceCommandQueue() {
         GET_RES(pD3DDevice, gpD3DDevices);
         PULL_D(FVF);
         const auto hresult = pD3DDevice->SetFVF(IN FVF);
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         SEND_OPTIONAL_SERVER_RESPONSE(hresult, currentUID);
         break;
       }
@@ -1432,7 +1514,7 @@ void ProcessDeviceCommandQueue() {
         if (SUCCEEDED(hresult)) {
           gpD3DVertexShaders[pHandle] = pShader;
         }
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         SEND_OPTIONAL_CREATE_FUNCTION_SERVER_RESPONSE(hresult, currentUID);
         break;
       }
@@ -1445,7 +1527,7 @@ void ProcessDeviceCommandQueue() {
           pShader = gpD3DVertexShaders[pHandle];
         }
         const auto hresult = pD3DDevice->SetVertexShader(IN pShader);
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         SEND_OPTIONAL_SERVER_RESPONSE(hresult, currentUID);
         break;
       }
@@ -1459,7 +1541,7 @@ void ProcessDeviceCommandQueue() {
         float* pConstantData = nullptr;
         PULL_DATA(Count * sizeof(float) * 4, pConstantData);
         const auto hresult = pD3DDevice->SetVertexShaderConstantF(IN StartRegister, IN pConstantData, IN Count);
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         SEND_OPTIONAL_SERVER_RESPONSE(hresult, currentUID);
         break;
       }
@@ -1473,7 +1555,7 @@ void ProcessDeviceCommandQueue() {
         int* pConstantData = nullptr;
         PULL_DATA(Count * sizeof(int) * 4, pConstantData);
         const auto hresult = pD3DDevice->SetVertexShaderConstantI(IN StartRegister, IN pConstantData, IN Count);
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         SEND_OPTIONAL_SERVER_RESPONSE(hresult, currentUID);
         break;
       }
@@ -1487,7 +1569,7 @@ void ProcessDeviceCommandQueue() {
         BOOL* pConstantData = nullptr;
         PULL_DATA(Count * sizeof(BOOL), pConstantData);
         const auto hresult = pD3DDevice->SetVertexShaderConstantB(IN StartRegister, IN pConstantData, IN Count);
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         SEND_OPTIONAL_SERVER_RESPONSE(hresult, currentUID);
         break;
       }
@@ -1505,7 +1587,7 @@ void ProcessDeviceCommandQueue() {
           pStreamData = (IDirect3DVertexBuffer9*) gpD3DResources[pHandle];
         }
         const auto hresult = pD3DDevice->SetStreamSource(IN StreamNumber, IN pStreamData, IN OffsetInBytes, IN Stride);
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         SEND_OPTIONAL_SERVER_RESPONSE(hresult, currentUID);
         break;
       }
@@ -1517,7 +1599,7 @@ void ProcessDeviceCommandQueue() {
         PULL_U(StreamNumber);
         PULL_U(Divider);
         const auto hresult = pD3DDevice->SetStreamSourceFreq(StreamNumber, Divider);
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         SEND_OPTIONAL_SERVER_RESPONSE(hresult, currentUID);
         break;
       }
@@ -1532,7 +1614,7 @@ void ProcessDeviceCommandQueue() {
           pIndexData = (IDirect3DIndexBuffer9*) gpD3DResources[pHandle];
         }
         const auto hresult = pD3DDevice->SetIndices(IN pIndexData);
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         SEND_OPTIONAL_SERVER_RESPONSE(hresult, currentUID);
         break;
       }
@@ -1550,7 +1632,7 @@ void ProcessDeviceCommandQueue() {
         if (SUCCEEDED(hresult)) {
           gpD3DPixelShaders[pHandle] = pShader;
         }
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         SEND_OPTIONAL_CREATE_FUNCTION_SERVER_RESPONSE(hresult, currentUID);
         break;
       }
@@ -1563,7 +1645,7 @@ void ProcessDeviceCommandQueue() {
           pShader = gpD3DPixelShaders[pHandle];
         }
         const auto hresult = pD3DDevice->SetPixelShader(IN pShader);
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         SEND_OPTIONAL_SERVER_RESPONSE(hresult, currentUID);
         break;
       }
@@ -1577,7 +1659,7 @@ void ProcessDeviceCommandQueue() {
         float* pConstantData = nullptr;
         PULL_DATA(Count * sizeof(float) * 4, pConstantData);
         const auto hresult = pD3DDevice->SetPixelShaderConstantF(IN StartRegister, IN pConstantData, IN Count);
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         SEND_OPTIONAL_SERVER_RESPONSE(hresult, currentUID);
         break;
       }
@@ -1591,7 +1673,7 @@ void ProcessDeviceCommandQueue() {
         int* pConstantData = nullptr;
         PULL_DATA(Count * sizeof(int) * 4, pConstantData);
         const auto hresult = pD3DDevice->SetPixelShaderConstantI(IN StartRegister, IN pConstantData, IN Count);
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         SEND_OPTIONAL_SERVER_RESPONSE(hresult, currentUID);
         break;
       }
@@ -1605,7 +1687,7 @@ void ProcessDeviceCommandQueue() {
         BOOL* pConstantData = nullptr;
         PULL_DATA(Count * sizeof(BOOL), pConstantData);
         const auto hresult = pD3DDevice->SetPixelShaderConstantB(IN StartRegister, IN pConstantData, IN Count);
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         SEND_OPTIONAL_SERVER_RESPONSE(hresult, currentUID);
         break;
       }
@@ -1622,7 +1704,7 @@ void ProcessDeviceCommandQueue() {
         GET_RES(pD3DDevice, gpD3DDevices);
         PULL_U(ISwapChain);
         const auto hresult = ((IDirect3DDevice9Ex*) pD3DDevice)->WaitForVBlank(IN ISwapChain);
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         break;
       }
       case IDirect3DDevice9Ex_SetConvolutionMonoKernel:
@@ -1635,7 +1717,7 @@ void ProcessDeviceCommandQueue() {
         float* pColumns = nullptr;
         PULL_DATA(sizeof(float) * HEIGHT, pColumns);
         const auto hresult = ((IDirect3DDevice9Ex*) pD3DDevice)->SetConvolutionMonoKernel(IN WIDTH, IN HEIGHT, IN pRows, IN pColumns);
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         SEND_OPTIONAL_SERVER_RESPONSE(hresult, currentUID);
         break;
       }
@@ -1666,7 +1748,7 @@ void ProcessDeviceCommandQueue() {
         PULL(uint32_t, hDestinationWindow);
         HWND hwnd = TRUNCATE_HANDLE(HWND, hDestinationWindow);
         const auto hresult = ((IDirect3DDevice9Ex*) pD3DDevice)->CheckDeviceState(IN hwnd);
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         {
           ServerMessage c(Commands::Bridge_Response, currentUID);
           c.send_data(hresult);
@@ -1707,7 +1789,7 @@ void ProcessDeviceCommandQueue() {
         GET_HND(pHandle);
         const auto& pSB = gpD3DStateBlocks[pHandle];
         const auto hresult = pSB->Capture();
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         break;
       }
       case IDirect3DStateBlock9_Apply:
@@ -1716,7 +1798,7 @@ void ProcessDeviceCommandQueue() {
         const auto& pSB = gpD3DStateBlocks[pHandle];
         assert(pSB != nullptr);
         const auto hresult = pSB->Apply();
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         break;
       }
 
@@ -1777,7 +1859,7 @@ void ProcessDeviceCommandQueue() {
           gpD3DResources[pDestSurfaceHandle] = pDestSurface;
         }
         hresult = ReturnSurfaceDataToClient(pDestSurface, hresult, currentUID);
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         break;
       }
       case IDirect3DSwapChain9_GetBackBuffer:
@@ -1791,7 +1873,7 @@ void ProcessDeviceCommandQueue() {
         if (SUCCEEDED(hresult)) {
           gpD3DResources[pSurfaceHandle] = pBackbuffer;
         }
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         SEND_OPTIONAL_SERVER_RESPONSE(hresult, currentUID);
         break;
       }
@@ -2046,7 +2128,7 @@ void ProcessDeviceCommandQueue() {
         const auto& pTexture = (IDirect3DTexture9*) gpD3DResources[pHandle];
         D3DSURFACE_DESC pDesc;
         const auto hresult = pTexture->GetLevelDesc(Level, &pDesc);
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         break;
       }
       case IDirect3DTexture9_GetSurfaceLevel:
@@ -2060,7 +2142,7 @@ void ProcessDeviceCommandQueue() {
         if (SUCCEEDED(hresult)) {
           gpD3DResources[pSurfaceHandle] = pSurfaceLevel;
         }
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         break;
       }
       case IDirect3DTexture9_LockRect:
@@ -2080,7 +2162,7 @@ void ProcessDeviceCommandQueue() {
         const auto& pTexture = (IDirect3DTexture9*) gpD3DResources[pHandle];
         const auto hresult = pTexture->AddDirtyRect(IN pDirtyRect);
         SEND_OPTIONAL_SERVER_RESPONSE(hresult, currentUID);
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         break;
       }
 
@@ -2147,7 +2229,7 @@ void ProcessDeviceCommandQueue() {
         const auto& pVolumeTexture = (IDirect3DVolumeTexture9*) gpD3DResources[pHandle];
         D3DVOLUME_DESC pDesc;
         const auto hresult = pVolumeTexture->GetLevelDesc(Level, &pDesc);
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         break;
       }
       case IDirect3DVolumeTexture9_GetVolumeLevel:
@@ -2161,7 +2243,7 @@ void ProcessDeviceCommandQueue() {
         if (SUCCEEDED(hresult)) {
           gpD3DVolumes[pVolumeLevelHandle] = pVolumeLevel;
         }
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         break;
       }
       case IDirect3DVolumeTexture9_LockBox:
@@ -2208,7 +2290,7 @@ void ProcessDeviceCommandQueue() {
         assert(pulledSize == depth * slice_size);
 #endif
         hresult = pVolumeTexture->UnlockBox(Level);
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         break;
       }
       case IDirect3DVolumeTexture9_AddDirtyBox:
@@ -2219,7 +2301,7 @@ void ProcessDeviceCommandQueue() {
         const auto& pVolumeTexture = (IDirect3DVolumeTexture9*) gpD3DResources[pHandle];
         const auto hresult = pVolumeTexture->AddDirtyBox(IN pBox);
         SEND_OPTIONAL_SERVER_RESPONSE(hresult, currentUID);
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         break;
       }
 
@@ -2286,7 +2368,7 @@ void ProcessDeviceCommandQueue() {
         const auto& pCubeTexture = (IDirect3DCubeTexture9*) gpD3DResources[pHandle];
         D3DSURFACE_DESC pDesc;
         const auto hresult = pCubeTexture->GetLevelDesc(Level, &pDesc);
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         break;
       }
       case IDirect3DCubeTexture9_GetCubeMapSurface:
@@ -2301,7 +2383,7 @@ void ProcessDeviceCommandQueue() {
         if (SUCCEEDED(hresult)) {
           gpD3DResources[pCubeMapSurfaceHandle] = pCubeMapSurface;
         }
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         break;
       }
       case IDirect3DCubeTexture9_LockRect:
@@ -2322,7 +2404,7 @@ void ProcessDeviceCommandQueue() {
         const auto& pCubeTexture = (IDirect3DCubeTexture9*) gpD3DResources[pCubeTextureHandle];
         const auto hresult = pCubeTexture->AddDirtyRect(IN FaceType, IN pDirtyRect);
         SEND_OPTIONAL_SERVER_RESPONSE(hresult, currentUID);
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         break;
       }
 
@@ -2397,7 +2479,7 @@ void ProcessDeviceCommandQueue() {
         }
         memcpy(pbData, data, SizeToLock);
         hresult = pVertexBuffer->Unlock();
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
 
         break;
       }
@@ -2408,7 +2490,7 @@ void ProcessDeviceCommandQueue() {
         const auto& pVertexBuffer = (IDirect3DVertexBuffer9*) gpD3DResources[pHandle];
         D3DVERTEXBUFFER_DESC pDesc;
         const auto hresult = pVertexBuffer->GetDesc(OUT & pDesc);
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         break;
       }
 
@@ -2483,7 +2565,7 @@ void ProcessDeviceCommandQueue() {
         }
         memcpy(pbData, data, SizeToLock);
         hresult = pIndexBuffer->Unlock();
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         break;
       }
       case IDirect3DIndexBuffer9_GetDesc:
@@ -2493,7 +2575,7 @@ void ProcessDeviceCommandQueue() {
         const auto& pIndexBuffer = (IDirect3DIndexBuffer9*) gpD3DResources[pHandle];
         D3DINDEXBUFFER_DESC pDesc;
         const auto hresult = pIndexBuffer->GetDesc(OUT & pDesc);
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         break;
       }
 
@@ -2542,7 +2624,7 @@ void ProcessDeviceCommandQueue() {
         const auto& pSurface = (IDirect3DSurface9*) gpD3DResources[pHandle];
         D3DSURFACE_DESC pDesc;
         const auto hresult = pSurface->GetDesc(OUT & pDesc);
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         break;
       }
       case IDirect3DSurface9_LockRect:
@@ -2551,7 +2633,7 @@ void ProcessDeviceCommandQueue() {
         GET_HND(pHandle);
         const auto pSurface = (IDirect3DSurface9*) gpD3DResources[pHandle];
         HRESULT hresult = ReturnSurfaceDataToClient(pSurface, S_OK, currentUID);
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         break;
       }
       case IDirect3DSurface9_UnlockRect:
@@ -2590,7 +2672,7 @@ void ProcessDeviceCommandQueue() {
           memcpy(ptr, (PBYTE) pData + y * IncomingPitch, rowSize);
         )
         hresult = pSurface->UnlockRect();
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
 
         break;
       }
@@ -2636,7 +2718,7 @@ void ProcessDeviceCommandQueue() {
         const auto& pVolume = gpD3DVolumes[pHandle];
         D3DVOLUME_DESC pDesc;
         const auto hresult = pVolume->GetDesc(OUT & pDesc);
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         break;
       }
       case IDirect3DVolume9_LockBox:
@@ -2682,7 +2764,7 @@ void ProcessDeviceCommandQueue() {
         assert(pulledSize == depth * slice_size);
 #endif
         hresult = pVolume->UnlockBox();
-        assert(SUCCEEDED(hresult));
+        CHECK_HR(hresult);
         break;
       }
 
@@ -3468,10 +3550,8 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, 
   }
   }
   const auto synResponse = DeviceBridge::pop_front(); // Get process handle from Syn response
-  // Pulling default data sent from client to have the data queue in sync
-  {
-    PULL_U(uid);
-  }
+  // 2026-09-05: the client no longer sends a UID word; count the header instead (see g_rxUID).
+  g_rxUID++;
   Logger::info("Registering exit callback in case client exits unexpectedly.");
   RegisterExitCallback(synResponse.pHandle);
 
@@ -3502,10 +3582,8 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, 
     return 1;
   }
   }
-  // Pulling default data sent from client to have the data queue in sync
-  {
-    PULL_U(uid);
-  }
+  // 2026-09-05: the client no longer sends a UID word; count the header instead (see g_rxUID).
+  g_rxUID++;
   // (5) Ready to listen for incoming commands
   Logger::info("Handshake completed! Now waiting for incoming commands...");
 

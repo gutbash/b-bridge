@@ -29,14 +29,7 @@
 #include "util_modulecommand.h"
 
 #undef WAIT_FOR_SERVER_RESPONSE
-#define WAIT_FOR_SERVER_RESPONSE(func, value, uidVal) \
-  { \
-    const uint32_t timeoutMs = GlobalOptions::getAckTimeout(); \
-    if (Result::Success != ModuleBridge::waitForCommand(Commands::Bridge_Response, timeoutMs, nullptr, true, uidVal)) { \
-      Logger::err(func " failed with: no response from server."); \
-      return value; \
-    } \
-  }
+#define WAIT_FOR_SERVER_RESPONSE(func, value, uidVal)   {     const uint32_t timeoutMs = GlobalOptions::getAckTimeout();     const uint64_t waitT0 = bridge_util::WaitStats::nowUs();     const auto waitRes = ModuleBridge::waitForCommand(Commands::Bridge_Response, timeoutMs, nullptr, true, uidVal);     bridge_util::WaitStats::get().record(bridge_util::WaitStats::get().waits, func, bridge_util::WaitStats::nowUs() - waitT0);     if (Result::Success != waitRes) {       Logger::err(func " failed with: no response from server.");       return value;     }   }
 
 // This is a modified version of the original hash_combine function
 // from Boost. See: https://github.com/boostorg/container_hash

@@ -78,7 +78,9 @@ void processModuleCommandQueue(std::atomic<bool>* const pbSignalEnd) {
   while (RESULT_SUCCESS(ModuleBridge::waitForCommand(
     Commands::Bridge_Any, 0, pbSignalEnd))) {
     const Header rpcHeader = ModuleBridge::pop_front();
-    PULL_U(currentUID);
+    // See ProcessDeviceCommandQueue: the UID is the count of headers pulled on this channel.
+    static UINT s_rxUID = 0;
+    const UINT currentUID = s_rxUID++;
 #if defined(_DEBUG) || defined(DEBUGOPT)
     if (GlobalOptions::getLogServerCommands()) {
       Logger::info("Module Processing: " + toString(rpcHeader.command) + " UID: " + std::to_string(currentUID));

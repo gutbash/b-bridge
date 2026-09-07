@@ -21,6 +21,8 @@
  */
 #include "pch.h"
 #include "d3d9_lss.h"
+#include <cstring>
+#include <type_traits>
 
 
 /*
@@ -69,9 +71,66 @@ HRESULT Direct3DStateBlock9_LSS::GetDevice(IDirect3DDevice9** ppDevice) {
   return S_OK;
 }
 
+void Direct3DStateBlock9_LSS::buildPlan() {
+  const auto& flags = m_dirtyFlags;
+  TransferPlan p;
+  auto collect = [](const auto& arr, auto& out, bool& all) {
+    using T = typename std::remove_reference_t<decltype(out)>::value_type;
+    out.clear();
+    for (size_t i = 0; i < arr.size(); i++) {
+      if (arr[i]) {
+        out.push_back((T) i);
+      }
+    }
+    all = (out.size() == arr.size());
+  };
+  bool dummy;
+  collect(flags.renderStates, p.renderStates, p.allRenderStates);
+  collect(flags.transforms, p.transforms, p.allTransforms);
+  collect(flags.vertexConstants.fConsts, p.vsF, p.allVsF);
+  collect(flags.vertexConstants.iConsts, p.vsI, p.allVsI);
+  collect(flags.vertexConstants.bConsts, p.vsB, dummy);
+  collect(flags.pixelConstants.fConsts, p.psF, p.allPsF);
+  collect(flags.pixelConstants.iConsts, p.psI, p.allPsI);
+  collect(flags.pixelConstants.bConsts, p.psB, dummy);
+  collect(flags.streams, p.streams, dummy);
+  collect(flags.streamOffsetsAndStrides, p.streamOffsetsAndStrides, dummy);
+  collect(flags.streamFreqs, p.streamFreqs, dummy);
+  collect(flags.textures, p.textures, dummy);
+  collect(flags.clipPlanes, p.clipPlanes, dummy);
+  size_t total = 0;
+  for (size_t i = 0; i < flags.samplerStates.size(); i++) {
+    for (size_t j = 0; j < flags.samplerStates[i].size(); j++) {
+      total++;
+      if (flags.samplerStates[i][j]) {
+        p.samplerStates.push_back((uint16_t) (i * 64 + j));
+      }
+    }
+  }
+  p.allSamplerStates = (p.samplerStates.size() == total);
+  total = 0;
+  for (size_t i = 0; i < flags.textureStageStates.size(); i++) {
+    for (size_t j = 0; j < flags.textureStageStates[i].size(); j++) {
+      total++;
+      if (flags.textureStageStates[i][j]) {
+        p.textureStageStates.push_back((uint16_t) (i * 64 + j));
+      }
+    }
+  }
+  p.allTextureStageStates = (p.textureStageStates.size() == total);
+  p.built = true;
+  m_plan = std::move(p);
+}
+
 void Direct3DStateBlock9_LSS::StateTransfer(const BaseDirect3DDevice9Ex_LSS::StateCaptureDirtyFlags& flags, BaseDirect3DDevice9Ex_LSS::State& src, BaseDirect3DDevice9Ex_LSS::State& dst) {
-  for (size_t i = 0; i < dst.renderStates.size(); i++) {
-    if (flags.renderStates[i]) {
+  if (!m_plan.built) {
+    buildPlan();
+  }
+  const TransferPlan& p = m_plan;
+  if (p.allRenderStates) {
+    dst.renderStates = src.renderStates;
+  } else {
+    for (uint16_t i : p.renderStates) {
       dst.renderStates[i] = src.renderStates[i];
     }
   }
@@ -81,34 +140,26 @@ void Direct3DStateBlock9_LSS::StateTransfer(const BaseDirect3DDevice9Ex_LSS::Sta
   if (flags.indices) {
     dst.indices = src.indices;
   }
-  for (int i = 0; i < flags.samplerStates.size(); i++) {
-    for (int j = 0; j < flags.samplerStates[i].size(); j++) {
-      if (flags.samplerStates[i][j]) {
-        dst.samplerStates[i][j] = src.samplerStates[i][j];
-      }
+  if (p.allSamplerStates) {
+    dst.samplerStates = src.samplerStates;
+  } else {
+    for (uint16_t k : p.samplerStates) {
+      dst.samplerStates[k >> 6][k & 63] = src.samplerStates[k >> 6][k & 63];
     }
   }
-  for (int i = 0; i < flags.streams.size(); i++) {
-    if (flags.streams[i]) {
-      dst.streams[i] = src.streams[i];
-    }
+  for (uint8_t i : p.streams) {
+    dst.streams[i] = src.streams[i];
   }
-  for (int i = 0; i < flags.streamOffsetsAndStrides.size(); i++) {
-    if (flags.streamOffsetsAndStrides[i]) {
-      dst.streamOffsets[i] = src.streamOffsets[i];
-      dst.streamStrides[i] = src.streamStrides[i];
-    }
+  for (uint8_t i : p.streamOffsetsAndStrides) {
+    dst.streamOffsets[i] = src.streamOffsets[i];
+    dst.streamStrides[i] = src.streamStrides[i];
   }
-  for (int i = 0; i < flags.streamFreqs.size(); i++) {
-    if (flags.streamFreqs[i]) {
-      dst.streamFreqs[i] = src.streamFreqs[i];
-    }
+  for (uint8_t i : p.streamFreqs) {
+    dst.streamFreqs[i] = src.streamFreqs[i];
   }
-  for (int i = 0; i < flags.textures.size(); i++) {
-    if (flags.textures[i]) {
-      dst.textures[i] = src.textures[i];
-      dst.textureTypes[i] = src.textureTypes[i];
-    }
+  for (uint8_t i : p.textures) {
+    dst.textures[i] = src.textures[i];
+    dst.textureTypes[i] = src.textureTypes[i];
   }
   if (flags.vertexShader) {
     dst.vertexShader = src.vertexShader;
@@ -125,16 +176,18 @@ void Direct3DStateBlock9_LSS::StateTransfer(const BaseDirect3DDevice9Ex_LSS::Sta
   for (const auto& [key, value] : flags.bLightEnables) {
     dst.bLightEnables[key] = src.bLightEnables[key];
   }
-  for (int i = 0; i < flags.transforms.size(); i++) {
-    if (flags.transforms[i]) {
+  if (p.allTransforms) {
+    dst.transforms = src.transforms;
+  } else {
+    for (uint16_t i : p.transforms) {
       dst.transforms[i] = src.transforms[i];
     }
   }
-  for (int i = 0; i < flags.textureStageStates.size(); i++) {
-    for (int j = 0; j < flags.textureStageStates[i].size(); j++) {
-      if (flags.textureStageStates[i][j]) {
-        dst.textureStageStates[i][j] = src.textureStageStates[i][j];
-      }
+  if (p.allTextureStageStates) {
+    dst.textureStageStates = src.textureStageStates;
+  } else {
+    for (uint16_t k : p.textureStageStates) {
+      dst.textureStageStates[k >> 6][k & 63] = src.textureStageStates[k >> 6][k & 63];
     }
   }
   if (flags.viewport) {
@@ -143,50 +196,50 @@ void Direct3DStateBlock9_LSS::StateTransfer(const BaseDirect3DDevice9Ex_LSS::Sta
   if (flags.scissorRect) {
     dst.scissorRect = src.scissorRect;
   }
-  for (int i = 0; i < flags.clipPlanes.size(); i++) {
-    if (flags.clipPlanes[i]) {
-      for (int j = 0; j < 4; j++) {
-        dst.clipPlanes[i][j] = src.clipPlanes[i][j];
-      }
+  for (uint8_t i : p.clipPlanes) {
+    for (int j = 0; j < 4; j++) {
+      dst.clipPlanes[i][j] = src.clipPlanes[i][j];
     }
   }
-  for (int i = 0; i < flags.vertexConstants.fConsts.size(); i++) {
-    if (flags.vertexConstants.fConsts[i]) {
+  if (p.allVsF) {
+    memcpy(dst.vertexConstants.fConsts, src.vertexConstants.fConsts, sizeof(dst.vertexConstants.fConsts));
+  } else {
+    for (uint16_t i : p.vsF) {
       dst.vertexConstants.fConsts[i] = src.vertexConstants.fConsts[i];
     }
   }
-  for (int i = 0; i < flags.vertexConstants.iConsts.size(); i++) {
-    if (flags.vertexConstants.iConsts[i]) {
+  if (p.allVsI) {
+    memcpy(dst.vertexConstants.iConsts, src.vertexConstants.iConsts, sizeof(dst.vertexConstants.iConsts));
+  } else {
+    for (uint16_t i : p.vsI) {
       dst.vertexConstants.iConsts[i] = src.vertexConstants.iConsts[i];
     }
   }
-  for (int i = 0; i < flags.vertexConstants.bConsts.size(); i++) {
-    if (flags.vertexConstants.bConsts[i]) {
-      size_t dwordIndex = i / 32;
-      size_t dwordOffset = i % 32;
-      uint32_t bitMask = 1 << dwordOffset;
-      dst.vertexConstants.bConsts[dwordIndex]
-        = (src.vertexConstants.bConsts[dwordIndex] & bitMask) ? dst.vertexConstants.bConsts[dwordIndex] | bitMask : dst.vertexConstants.bConsts[dwordIndex] & ~bitMask;
-    }
+  for (uint16_t i : p.vsB) {
+    const size_t dwordIndex = i / 32;
+    const uint32_t bitMask = 1u << (i % 32);
+    dst.vertexConstants.bConsts[dwordIndex]
+      = (src.vertexConstants.bConsts[dwordIndex] & bitMask) ? dst.vertexConstants.bConsts[dwordIndex] | bitMask : dst.vertexConstants.bConsts[dwordIndex] & ~bitMask;
   }
-  for (int i = 0; i < flags.pixelConstants.fConsts.size(); i++) {
-    if (flags.pixelConstants.fConsts[i]) {
+  if (p.allPsF) {
+    memcpy(dst.pixelConstants.fConsts, src.pixelConstants.fConsts, sizeof(dst.pixelConstants.fConsts));
+  } else {
+    for (uint16_t i : p.psF) {
       dst.pixelConstants.fConsts[i] = src.pixelConstants.fConsts[i];
     }
   }
-  for (int i = 0; i < flags.pixelConstants.iConsts.size(); i++) {
-    if (flags.pixelConstants.iConsts[i]) {
+  if (p.allPsI) {
+    memcpy(dst.pixelConstants.iConsts, src.pixelConstants.iConsts, sizeof(dst.pixelConstants.iConsts));
+  } else {
+    for (uint16_t i : p.psI) {
       dst.pixelConstants.iConsts[i] = src.pixelConstants.iConsts[i];
     }
   }
-  for (int i = 0; i < flags.pixelConstants.bConsts.size(); i++) {
-    if (flags.pixelConstants.bConsts[i]) {
-      size_t dwordIndex = i / 32;
-      size_t dwordOffset = i % 32;
-      uint32_t bitMask = 1 << dwordOffset;
-      dst.pixelConstants.bConsts[dwordIndex]
-        = (src.pixelConstants.bConsts[dwordIndex] & bitMask) ? dst.pixelConstants.bConsts[dwordIndex] | bitMask : dst.pixelConstants.bConsts[dwordIndex] & ~bitMask;
-    }
+  for (uint16_t i : p.psB) {
+    const size_t dwordIndex = i / 32;
+    const uint32_t bitMask = 1u << (i % 32);
+    dst.pixelConstants.bConsts[dwordIndex]
+      = (src.pixelConstants.bConsts[dwordIndex] & bitMask) ? dst.pixelConstants.bConsts[dwordIndex] | bitMask : dst.pixelConstants.bConsts[dwordIndex] & ~bitMask;
   }
 }
 
