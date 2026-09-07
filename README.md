@@ -78,6 +78,9 @@ from [docs/make_figures_pr.py](docs/make_figures_pr.py).
 
 ![Architecture](docs/figures_pr/arch_thumbnail.png)
 
+A 72-second explainer animation (Manim) is attached to the v0.1.0 release as `b-bridge_explainer.mp4`;
+the source is [docs/video/explainer.py](docs/video/explainer.py).
+
 ## Limitations
 
 These are the boundaries of what was tested. Nothing outside them should be assumed to work.
