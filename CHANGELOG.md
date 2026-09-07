@@ -17,8 +17,8 @@ First public build. Fork point: NVIDIAGameWorks/bridge-remix `7dbbd37` (2025-05-
 
 ### Server (`.trex\NvRemixBridge.exe`, x64)
 - StateBatch replay.
-- Vanilla DXVK mode is the supported configuration; DXVK pinned to 3.0.2 (3.1 fails
-  `CreateDevice` with this server).
+- Vanilla DXVK mode is the supported configuration; DXVK pinned to upstream 3.0.2
+  (byte-identical to the build the Remix package shipped). Newer releases untested.
 - `sendAllServerResponses = False`; responses only for calls that return data.
 
 ### Measured (RTX 2070, 2560x1440, GTA IV CE 1.2.0.59 + FusionFix)

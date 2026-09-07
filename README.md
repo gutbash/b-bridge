@@ -72,8 +72,8 @@ See [INSTALL.md](INSTALL.md) for the steps and [CHANGELOG.md](CHANGELOG.md) for 
 - **Overlays that hook the window from the server side cannot see input.** ReShade as a Vulkan
   layer renders fine but its overlay and hotkeys are dead, because the window belongs to the
   game process. Configure it by file.
-- **DXVK 3.1 does not work** with this server (device creation fails). Stay on 3.0.2, which
-  is what ships.
+- **DXVK 3.0.2 is the tested version** and is what ships. Newer DXVK releases have not been
+  validated with this server.
 - Only tested on one machine: RTX 2070, driver of September 2026, 2560x1440 borderless.
 
 ## Building
