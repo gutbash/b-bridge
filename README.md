@@ -49,14 +49,16 @@ Changes against upstream (all in `src/`):
 
 Reference system: Intel i7-9700K, NVIDIA GeForce RTX 2070 (8 GB), driver 610.74, 2560x1440 borderless,
 GTA IV CE 1.2.0.59 with FusionFix. Frame times are means over a fixed 60-second scripted drive
-(uncapped, view and detail distance 100), memory figures from an in-process address-space monitor.
+(uncapped), memory figures from an in-process address-space monitor at view and detail distance 100.
+The in-process and client-stage runs were taken at view distance 70; the texture-pack row at 100.
 
 | Configuration | Mean frame time | Largest free region |
 |---|---|---|
-| In-process DXVK, same route | 17.6 ms | 5 to 65 MB at view 100 |
-| BrokerBridge, upstream client | ~19 ms | 800 MB |
-| BrokerBridge, this client | 13.6 ms | 800 MB |
-| BrokerBridge, this client, 5 GB texture-pack stack | 16.4 ms | 735 to 819 MB |
+| In-process DXVK, same route (6 runs) | 16.9 ms | 5 MB at view 100 |
+| BrokerBridge, upstream client (5 runs) | 22.4 ms | ~800 MB |
+| BrokerBridge, transfer plans + responses off (4 runs) | 18.6 ms | ~800 MB |
+| BrokerBridge, final client (5 runs) | 13.6 ms | ~800 MB |
+| BrokerBridge, final client, 5 GB texture-pack stack | 16.4 ms | 735 to 819 MB |
 
 The batching work is what brings the bridged frame time below the in-process figure; the
 transport itself costs time, and the client hides it by sending fewer, larger messages.
