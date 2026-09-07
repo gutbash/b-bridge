@@ -1,4 +1,4 @@
-# Installing BrokerBridge
+# Installing b-bridge
 
 All paths are relative to the game's `GTAIV` folder (the one containing `GTAIV.exe`).
 
@@ -16,9 +16,9 @@ All paths are relative to the game's `GTAIV` folder (the one containing `GTAIV.e
 From the zip, copy the `GTAIV` folder over your `GTAIV` folder. You get:
 
 ```
-GTAIV\d3d9.dll                 BrokerBridge client (32-bit)
+GTAIV\d3d9.dll                 b-bridge client (32-bit)
 GTAIV\dxvk.conf                settings for the server's DXVK
-GTAIV\.trex\NvRemixBridge.exe  BrokerBridge server (64-bit)
+GTAIV\.trex\NvRemixBridge.exe  b-bridge server (64-bit)
 GTAIV\.trex\d3d9vk_x64.dll     DXVK 3.0.2, 64-bit, unmodified
 GTAIV\.trex\bridge.conf        bridge settings
 ```

@@ -1,4 +1,4 @@
-# BrokerBridge
+# b-bridge: out-of-process Direct3D 9 for GTA IV
 
 **Out-of-process Direct3D 9 rendering for Grand Theft Auto IV: The Complete Edition.**
 A research release. Fork of NVIDIA's [bridge-remix](https://github.com/NVIDIAGameWorks/bridge-remix).
@@ -8,7 +8,7 @@ A research release. Fork of NVIDIA's [bridge-remix](https://github.com/NVIDIAGam
 GTA IV is a 32-bit process. Every resource the graphics driver allocates on the game's behalf
 (textures, shadow maps, render targets, staging buffers) is mapped into the same 4 GB address
 space as the game's own data, and a heavily modded install exhausts that space long before it
-exhausts RAM or VRAM. BrokerBridge moves the entire Direct3D 9 device into a separate 64-bit
+exhausts RAM or VRAM. b-bridge moves the entire Direct3D 9 device into a separate 64-bit
 process. The game keeps a thin 32-bit `d3d9.dll` that forwards every call over a shared-memory
 channel to a 64-bit server, which renders through DXVK on Vulkan. On the test system this
 returned about 880 MB of address space to the game and held frame time at parity with
@@ -27,7 +27,7 @@ and a streaming-allocator crash band at 2.8 to 3.0 GB committed.
 ## Method
 
 The IPC layer of NVIDIA RTX Remix already marshals D3D9 across processes; its purpose there is
-to feed a path tracer. BrokerBridge keeps the transport and discards the renderer: the server
+to feed a path tracer. b-bridge keeps the transport and discards the renderer: the server
 loads an unmodified DXVK 3.0.2 instead of the Remix runtime, and the client is tuned for a game
 that issues 15,000 to 70,000 D3D9 calls per frame.
 
@@ -55,10 +55,10 @@ The in-process and client-stage runs were taken at view distance 70; the texture
 | Configuration | Mean frame time | Largest free region |
 |---|---|---|
 | In-process DXVK, same route (6 runs) | 16.9 ms | 5 MB at view 100 |
-| BrokerBridge, upstream client (5 runs) | 22.4 ms | ~800 MB |
-| BrokerBridge, transfer plans + responses off (4 runs) | 18.6 ms | ~800 MB |
-| BrokerBridge, final client (5 runs) | 13.6 ms | ~800 MB |
-| BrokerBridge, final client, 5 GB texture-pack stack | 16.4 ms | 735 to 819 MB |
+| b-bridge, upstream client (5 runs) | 22.4 ms | ~800 MB |
+| b-bridge, transfer plans + responses off (4 runs) | 18.6 ms | ~800 MB |
+| b-bridge, final client (5 runs) | 13.6 ms | ~800 MB |
+| b-bridge, final client, 5 GB texture-pack stack | 16.4 ms | 735 to 819 MB |
 
 The batching work is what brings the bridged frame time below the in-process figure; the
 transport itself costs time, and the client hides it by sending fewer, larger messages.
@@ -134,4 +134,4 @@ with live asserts and the client is several milliseconds slower per frame.
 MIT, as upstream. See `LICENSE-MIT` and `ThirdPartyLicenses.txt`. DXVK is zlib-licensed and
 redistributed unmodified. The upstream README is preserved as `README.upstream.md`.
 
-The name is the Broker Bridge in Liberty City. The client brokers the calls; the bridge is the shape.
+The name is short for Broker Bridge, after the bridge in Liberty City. The client brokers the calls; the bridge is the shape.

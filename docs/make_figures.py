@@ -1,4 +1,4 @@
-"""Build the BrokerBridge research figures (Plotly) from the reference install's bench CSVs.
+"""Build the b-bridge research figures (Plotly) from the reference install's bench CSVs.
 
 Outputs docs/figures/fig1..fig5.png and docs/figures.html. Run from anywhere:
     python docs/make_figures.py
@@ -81,7 +81,7 @@ figs.append(save(fig1, "fig1_frametime_stages"))
 a = sorted(frames("20260904_0350")); b = sorted(frames("20260905_0508"))
 def ecdf(v): return v, [i / len(v) for i in range(1, len(v) + 1)]
 fig2 = go.Figure()
-for v, name, col in [(a, "In-process DXVK", ORANGE), (b, "BrokerBridge, final client", BLUE)]:
+for v, name, col in [(a, "In-process DXVK", ORANGE), (b, "b-bridge, final client", BLUE)]:
     x, y = ecdf(v)
     fig2.add_scatter(x=x, y=y, mode="lines", name=name, line=dict(color=col, width=2),
                      hovertemplate=name + "<br>%{x:.1f} ms at %{y:.0%} of frames<extra></extra>")
@@ -101,7 +101,7 @@ for stamp in ["224023", "224606", "225049", "225533", "230015"]:
             if r and not r[0].startswith("#") and r[0] != "elapsed_s" and len(r) > 4]
     bridged.append(min(float(r[4]) for r in rows))
 fig3 = go.Figure()
-fig3.add_bar(x=["In-process DXVK", "BrokerBridge"], y=[5.4, statistics.median(bridged)],
+fig3.add_bar(x=["In-process DXVK", "b-bridge"], y=[5.4, statistics.median(bridged)],
              marker=dict(color=[ORANGE, BLUE], line=dict(width=0)), width=0.45,
              text=["5.4 MB", f"{statistics.median(bridged):.0f} MB (min {min(bridged):.0f}, max {max(bridged):.0f}, 5 sessions)"],
              textposition="outside", textfont=dict(color=INK),
@@ -149,11 +149,11 @@ fig5.update_yaxes(range=[0, 105])
 figs.append(save(fig5, "fig5_gpu_util"))
 
 # ---------------------------------------------------------------- HTML page with all figures
-html = ["<!doctype html><html><head><meta charset='utf-8'><title>BrokerBridge figures</title>",
+html = ["<!doctype html><html><head><meta charset='utf-8'><title>b-bridge figures</title>",
         "<script src='https://cdn.plot.ly/plotly-2.35.2.min.js'></script>",
         f"<style>body{{background:{SURFACE};color:{INK};font-family:Inter,Segoe UI,Arial,sans-serif;max-width:1120px;margin:24px auto;padding:0 16px}}",
         f"p{{color:{INK2};line-height:1.5}} .fig{{margin:28px 0}}</style></head><body>",
-        "<h1>BrokerBridge: measurements</h1>",
+        "<h1>b-bridge: measurements</h1>",
         "<p>Reference system: Intel i7-9700K, NVIDIA GeForce RTX 2070 (8 GB), driver 610.74, 2560x1440 borderless, "
         "GTA IV CE 1.2.0.59 with FusionFix. Frame times are means over a fixed 60-second scripted drive, uncapped. "
         "One machine, one vendor; see the README's Limitations section.</p>"]
