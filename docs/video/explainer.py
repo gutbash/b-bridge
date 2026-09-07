@@ -109,9 +109,13 @@ class Explainer(Scene):
         dx = rbox(4.0, 1.2, BLUE, "#1c2b40").move_to(srv.get_center() + UP * 0.2)
         dxt = T("DXVK 3.0.2 → Vulkan → GPU", 20, "#8fbcf3", BOLD).move_to(dx)
         self.play(FadeIn(srv), FadeIn(st), FadeIn(ss), run_time=0.8)
+        # keep the moving block above both process boxes while it crosses
+        drv.set_z_index(5); dt.set_z_index(6)
         target = drv.copy().set_stroke(AQUA).set_fill("#1e2a22").move_to(srv.get_center() + DOWN * 1.2)
-        tt = T("driver resources, 64-bit", 20, "#7fd6b3").move_to(target)
-        self.play(Transform(drv, target), Transform(dt, tt), run_time=1.4)
+        tt = T("driver resources, 64-bit", 20, "#7fd6b3").move_to(target).set_z_index(6)
+        path = ArcBetweenPoints(drv.get_center(), target.get_center(), angle=-PI / 3)
+        self.play(MoveAlongPath(drv, path), MoveAlongPath(dt, path), run_time=1.4, rate_func=smooth)
+        self.play(Transform(drv, target), Transform(dt, tt), run_time=0.5)
         self.play(FadeIn(dx), FadeIn(dxt))
         # client label replaces the freed space in the game
         client = rbox(4.0, 1.2, AQUA, "#1e2a22").move_to(game.get_center() + DOWN * 1.2)
