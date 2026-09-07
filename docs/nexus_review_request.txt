@@ -1,0 +1,19 @@
+To: support@nexusmods.com
+Subject: File review request - b-bridge 0.1.0 (GTA IV mod 1385) quarantined by automated checks
+
+Hello,
+
+My upload "b-bridge 0.1.0" on https://www.nexusmods.com/gta4/mods/1385 was quarantined by the automated safety checks. The zip contains compiled code (a 32-bit d3d9.dll, a 64-bit server executable, and an unmodified DXVK d3d9.dll), which I assume triggered the executables rule. VirusTotal reports 0/67 detections for the exact file:
+https://www.virustotal.com/gui/file/d5691ad68cca6e731bbe12b34b14b6a8288e2e7e319e8ef0e13e0f3a59c31c55
+
+Source code and build steps:
+- Repository: https://github.com/gutbash/b-bridge (MIT; fork of NVIDIA's bridge-remix, https://github.com/NVIDIAGameWorks/bridge-remix)
+- Release matching the upload, with the same zip as an asset: https://github.com/gutbash/b-bridge/releases/tag/v0.1.0
+- Build: Meson + ninja with MSVC 14.42. build_x86_release.cmd builds the client (GTAIV\d3d9.dll), build_x64_release.cmd builds the server (.trex\NvRemixBridge.exe). Both scripts are in the repository root; the README "Building" section documents the b_ndebug=true requirement.
+- .trex\d3d9vk_x64.dll is the unmodified x64/d3d9.dll from the upstream DXVK 3.0.2 release (https://github.com/doitsujin/dxvk/releases/tag/v3.0.2); it is byte-identical to that asset.
+
+The mod moves GTA IV's Direct3D 9 device into a separate 64-bit process over shared memory; the two binaries are the client proxy and the server. No network access, no persistence outside the game folder, no code injection into other processes.
+
+Thank you for taking a look.
+
+bbbbash
