@@ -61,6 +61,15 @@ GTA IV CE 1.2.0.59 with FusionFix. Frame times are means over a fixed 60-second 
 The batching work is what brings the bridged frame time below the in-process figure; the
 transport itself costs time, and the client hides it by sending fewer, larger messages.
 
+![Figure 1: mean frame time per client stage](docs/figures/fig1_frametime_stages.png)
+![Figure 2: frame-time distribution, in-process vs bridged](docs/figures/fig2_frametime_ecdf.png)
+![Figure 3: largest free address-space region at view 100](docs/figures/fig3_address_space.png)
+![Figure 4: cost of the content and post-processing stack](docs/figures/fig4_content_ladder.png)
+![Figure 5: GPU utilisation through a bench session](docs/figures/fig5_gpu_util.png)
+
+Interactive versions of these figures are in [docs/figures.html](docs/figures.html); the script that
+produces them from the bench CSVs is [docs/make_figures.py](docs/make_figures.py).
+
 ## Limitations
 
 These are the boundaries of what was tested. Nothing outside them should be assumed to work.
