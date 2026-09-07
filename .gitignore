@@ -32,3 +32,5 @@ test/rtx/APICs/
 vsgen/__pycache__/**
 
 /gametargets.conf
+# manim output
+media/
