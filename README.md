@@ -72,6 +72,12 @@ transport itself costs time, and the client hides it by sending fewer, larger me
 Interactive versions of these figures are in [docs/figures.html](docs/figures.html); the script that
 produces them from the bench CSVs is [docs/make_figures.py](docs/make_figures.py).
 
+A presentation set (dark theme, 3D ridges, address-space terrain, per-run scatter) and the architecture
+diagram live in [docs/figures_pr/](docs/figures_pr/), interactive in [docs/figures_pr.html](docs/figures_pr.html),
+from [docs/make_figures_pr.py](docs/make_figures_pr.py).
+
+![Architecture](docs/figures_pr/arch_thumbnail.png)
+
 ## Limitations
 
 These are the boundaries of what was tested. Nothing outside them should be assumed to work.
