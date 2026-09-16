@@ -122,8 +122,10 @@ These are the boundaries of what was tested. Nothing outside them should be assu
 - **Resolution list.** The server's DXVK lists only the desktop mode, its 60 Hz variant and six
   standard fallbacks, because GTA IV overruns a fixed-size array when a driver advertises over a
   hundred modes. 0.1.0 also forced a 16:9 aspect filter, which removed the desktop mode itself on
-  16:10 displays; 0.1.1 drops it. If your display's native mode is still missing, it is a mode the
-  desktop is not currently set to.
+  16:10 displays; 0.1.1 drops it. A mode that is not the current desktop mode is not listed, and
+  that includes DSR and DLDSR resolutions: launching with the game set to one gives a black screen
+  and a crash ([#1](https://github.com/gutbash/b-bridge/issues/1)). Set the desktop to that
+  resolution before launching (the reporter scripted it with `qres`) and back afterwards.
 
 ## Reproducibility
 

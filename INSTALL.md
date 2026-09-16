@@ -65,6 +65,9 @@ startup desync. Launch again.
 The in-game resolution list is short on purpose: the desktop mode, its 60 Hz variant and six
 standard fallbacks. GTA IV copies the driver's mode list into a fixed-size array and a modern
 driver's full list overruns it. If the mode you want is missing, set the desktop to it first.
+That includes DSR and DLDSR resolutions: with the game set to one and the desktop at native, the
+launch is a black screen and a crash. Switch the desktop to the DSR resolution before starting
+the game (`qres.exe /x 3840 /y 2160`, launch, then switch back), or set the game to native.
 Do not add `d3d9.forceAspectRatio` to `dxvk.conf`; it removes the desktop mode on non-16:9
 displays.
 

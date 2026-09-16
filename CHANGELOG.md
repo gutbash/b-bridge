@@ -18,6 +18,9 @@ byte-identical to 0.1.0.
 - User reports: runs on AMD (Radeon 680M, Windows 11) and Intel Arc B580 (Linux, Proton), on
   1.0.7.0, 1.0.8.0 and 1.2.0.x; does not run on 1.0.4.0; vanilla DXVK 3.1 works as a drop-in;
   a 16-hour session without texture loss. None of these are measured here.
+- DSR/DLDSR resolutions are not in the mode list unless the desktop is set to them; the launch
+  black screen and crash from [#1](https://github.com/gutbash/b-bridge/issues/1) is that, and the
+  reporter's `qres` workaround is the documented one.
 - The in-process reference frame time is 16.9 ms (mean of six runs); the 0.1.0 entry below said
   17.6 ms, which was a single earlier run.
 
