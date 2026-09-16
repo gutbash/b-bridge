@@ -60,7 +60,15 @@ A healthy start shows `Loading standard Non-RTX DXVK d3d9 dll` in `bridge64.log`
 If the game exits after about 12 seconds and `bridge64.log` was not written, that is the known
 startup desync. Launch again.
 
-## 5. Video memory
+## 5. Resolution
+
+The in-game resolution list is short on purpose: the desktop mode, its 60 Hz variant and six
+standard fallbacks. GTA IV copies the driver's mode list into a fixed-size array and a modern
+driver's full list overruns it. If the mode you want is missing, set the desktop to it first.
+Do not add `d3d9.forceAspectRatio` to `dxvk.conf`; it removes the desktop mode on non-16:9
+displays.
+
+## 6. Video memory
 
 The server reports the VRAM in `dxgi.maxDeviceMemory` to the game, and GTA IV sizes its texture
 streaming from that number. The shipped value is 4096. Under the bridge this costs the game no

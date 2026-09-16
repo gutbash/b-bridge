@@ -87,15 +87,18 @@ v0.1.0 release as `b-bridge_explainer.mp4`; the source is [docs/video/explainer.
 
 These are the boundaries of what was tested. Nothing outside them should be assumed to work.
 
-- **NVIDIA only.** Every measurement was taken on one RTX 2070 with one driver version. No AMD
-  or Intel GPU has run this build. DXVK itself is vendor-neutral, but the bridge server's device
-  creation and swapchain path have not been exercised on any other Vulkan driver.
+- **Measured on NVIDIA only.** Every number above was taken on one RTX 2070 with one driver
+  version. Users have since run the build on AMD (Radeon 680M, RDNA2, Windows 11) and on Intel
+  Arc B580 under Linux with Proton and Mesa ANV ([#2](https://github.com/gutbash/b-bridge/issues/2),
+  [#3](https://github.com/gutbash/b-bridge/issues/3)). Those are reports that it runs, not
+  measurements: no frame-time or address-space figures exist from either system.
 - **One machine, one configuration.** One CPU, one resolution and refresh rate, borderless
   windowed only. Exclusive fullscreen is disabled by the shipped `dxvk.conf` because the mode
   switch loses the device across the process boundary.
-- **One game build and one mod stack.** GTA IV CE 1.2.0.59 with FusionFix loaded through an
-  ASI loader. Other patch levels (1.0.7.0, 1.0.8.0), the unpatched Complete Edition, and
-  FusionFix loaded through its own `d3d9.dll` are untested.
+- **One game build and one mod stack measured.** GTA IV CE 1.2.0.59 with FusionFix loaded
+  through an ASI loader. Users report 1.0.7.0, 1.0.8.0 and other 1.2.0.x builds working, and
+  1.0.4.0 not working; the 1.0.4.0 failure has not been investigated. FusionFix loaded through
+  its own `d3d9.dll` is untested.
 - **Raster only.** GTA IV is a deferred renderer and the Remix path-traced pipeline does not
   produce a usable image with it. That pipeline is not shipped.
 - **CPU-bound scenes do not improve.** Every D3D9 call still crosses the process boundary.
@@ -110,9 +113,17 @@ These are the boundaries of what was tested. Nothing outside them should be assu
 - **Overlays on the server side get no input.** A ReShade Vulkan layer in the server renders
   correctly but its overlay and hotkeys are dead, because the window belongs to the game
   process. Such tools must be configured by file.
-- **DXVK 3.0.2 only.** Newer DXVK releases have not been validated with this server.
-- **Session length.** The longest single measured session is about 25 minutes. Multi-hour
-  stability has not been characterised.
+- **DXVK 3.0.2 is what ships and what was measured.** A user reports vanilla DXVK 3.1 dropped
+  in as `.trex\d3d9vk_x64.dll` running for multi-hour sessions on both the Intel and AMD systems
+  above. Not validated here.
+- **Session length.** The longest measured session is about 25 minutes. A user reports a 16-hour
+  session (14 of them idle in the pause menu) with no texture loss on the Intel Arc system; that is
+  a report, not a measurement.
+- **Resolution list.** The server's DXVK lists only the desktop mode, its 60 Hz variant and six
+  standard fallbacks, because GTA IV overruns a fixed-size array when a driver advertises over a
+  hundred modes. 0.1.0 also forced a 16:9 aspect filter, which removed the desktop mode itself on
+  16:10 displays; 0.1.1 drops it. If your display's native mode is still missing, it is a mode the
+  desktop is not currently set to.
 
 ## Reproducibility
 
@@ -125,7 +136,10 @@ free region over the session.
 ## Future work
 
 - Isolate and fix the startup desync.
-- Validate on AMD and Intel Vulkan drivers.
+- Measure on AMD and Intel Vulkan drivers, where users report it running.
+- Find out why 1.0.4.0 does not work.
+- Give a server-side ReShade its overlay and hotkeys back, which needs input forwarded from the
+  game window to the server.
 - Reduce per-call client overhead further; the render thread still spends a measurable share
   of its time in the client wrapper.
 - Characterise multi-hour sessions.

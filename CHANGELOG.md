@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.1.1 - 2026-09-16
+
+Configuration and documentation only. `d3d9.dll`, `NvRemixBridge.exe` and `d3d9vk_x64.dll` are
+byte-identical to 0.1.0.
+
+### Fixed
+- `dxvk.conf` no longer sets `d3d9.forceAspectRatio = 16:9`. Together with
+  `d3d9.modeCountCompatibility` that filter removed the desktop mode itself on any display that is
+  not 16:9, leaving a 1920x1200 panel with only 1280x720 and 1920x1080 to choose from
+  ([#3](https://github.com/gutbash/b-bridge/issues/3)). The mode-count filter alone keeps the list
+  short enough for the game.
+- `dxvk.conf` rewritten as a shipped file: the 0.1.0 copy was the reference install's working
+  notes.
+
+### Documented
+- User reports: runs on AMD (Radeon 680M, Windows 11) and Intel Arc B580 (Linux, Proton), on
+  1.0.7.0, 1.0.8.0 and 1.2.0.x; does not run on 1.0.4.0; vanilla DXVK 3.1 works as a drop-in;
+  a 16-hour session without texture loss. None of these are measured here.
+- The in-process reference frame time is 16.9 ms (mean of six runs); the 0.1.0 entry below said
+  17.6 ms, which was a single earlier run.
+
 ## 0.1.0 - 2026-09-07
 
 First public build. Fork point: NVIDIAGameWorks/bridge-remix `7dbbd37` (2025-05-02).
@@ -22,7 +43,7 @@ First public build. Fork point: NVIDIAGameWorks/bridge-remix `7dbbd37` (2025-05-
 - `sendAllServerResponses = False`; responses only for calls that return data.
 
 ### Measured (RTX 2070, 2560x1440, GTA IV CE 1.2.0.59 + FusionFix)
-- In-process DXVK 17.6 ms -> bridged 13.6 ms mean frame time on the same route after the
+- In-process DXVK 16.9 ms -> bridged 13.6 ms mean frame time on the same route after the
   batching work (uncapped, view and detail distance 100).
 - About 880 MB more free address space in the game process; largest free hole 735-819 MB with
   a 5 GB texture-pack stack loaded.
