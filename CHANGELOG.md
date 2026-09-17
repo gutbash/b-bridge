@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.2 - 2026-09-17
+
+Configuration only; binaries unchanged since 0.1.0.
+
+### Changed
+- `bridge.conf` ships `client.forceWindowed = True`. The client rewrites every device creation
+  and reset to windowed, which the bridge needs anyway (an exclusive fullscreen mode switch loses
+  the device across the process boundary). This is what makes 1.0.4.0 run, reported by ant-sh on
+  [#2](https://github.com/gutbash/b-bridge/issues/2): that patch asks for fullscreen regardless
+  of its settings. On builds already running borderless it changes nothing.
+
 ## 0.1.1 - 2026-09-16
 
 Configuration and documentation only. `d3d9.dll`, `NvRemixBridge.exe` and `d3d9vk_x64.dll` are

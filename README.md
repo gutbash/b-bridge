@@ -96,9 +96,10 @@ These are the boundaries of what was tested. Nothing outside them should be assu
   windowed only. Exclusive fullscreen is disabled by the shipped `dxvk.conf` because the mode
   switch loses the device across the process boundary.
 - **One game build and one mod stack measured.** GTA IV CE 1.2.0.59 with FusionFix loaded
-  through an ASI loader. Users report 1.0.7.0, 1.0.8.0 and other 1.2.0.x builds working, and
-  1.0.4.0 not working; the 1.0.4.0 failure has not been investigated. FusionFix loaded through
-  its own `d3d9.dll` is untested.
+  through an ASI loader. Users report 1.0.7.0, 1.0.8.0 and other 1.2.0.x builds working.
+  1.0.4.0 works once the client forces windowed mode (`client.forceWindowed = True` in
+  `bridge.conf`, on by default since 0.1.2); it asks for exclusive fullscreen regardless of its
+  settings. FusionFix loaded through its own `d3d9.dll` is untested.
 - **Raster only.** GTA IV is a deferred renderer and the Remix path-traced pipeline does not
   produce a usable image with it. That pipeline is not shipped.
 - **CPU-bound scenes do not improve.** Every D3D9 call still crosses the process boundary.
@@ -139,7 +140,6 @@ free region over the session.
 
 - Isolate and fix the startup desync.
 - Measure on AMD and Intel Vulkan drivers, where users report it running.
-- Find out why 1.0.4.0 does not work.
 - Give a server-side ReShade its overlay and hotkeys back, which needs input forwarded from the
   game window to the server.
 - Reduce per-call client overhead further; the render thread still spends a measurable share
