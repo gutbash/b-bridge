@@ -52,7 +52,7 @@ Changes against upstream (all in `src/`):
 Reference system: Intel i7-9700K, NVIDIA GeForce RTX 2070 (8 GB), driver 610.74, 2560x1440 borderless,
 GTA IV CE 1.2.0.59 with FusionFix. Frame times are means over a fixed 60-second scripted drive
 (uncapped), memory figures from an in-process address-space monitor at view and detail distance 100.
-The in-process and client-stage runs were taken at view distance 70; the texture-pack row at 100.
+The in-process and client-stage frame times were taken at view distance 70; the texture-pack row at 100.
 
 | Configuration | Mean frame time | Largest free region |
 |---|---|---|
